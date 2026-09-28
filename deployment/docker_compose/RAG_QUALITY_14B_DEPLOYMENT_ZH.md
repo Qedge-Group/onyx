@@ -337,47 +337,327 @@ docker compose \
 
 `RestartCount=0` 是正常结果。Compose 创建了新容器，不是在旧容器中执行重启。
 
-## 6. Ollama 14B 模型配置
+## 6. 在独立服务器部署 Ollama 14B 模型
 
-### 6.1 创建 20K 模型
+本节以 Ubuntu 24.04、NVIDIA GPU 和 systemd 为例。
 
-在 Ollama 服务器创建 `Modelfile`：
+目标模型名称为：
+
+```text
+onyx-qwen3-14b-20k:latest
+```
+
+Ollama 官方 Linux 安装说明：<https://ollama.com/download/linux>
+
+Ollama 官方服务配置说明：<https://docs.ollama.com/faq>
+
+### 6.1 检查服务器资源
+
+登录 Ollama 服务器：
+
+```bash
+ssh root@OLLAMA_SERVER_IP
+```
+
+检查操作系统：
+
+```bash
+cat /etc/os-release
+```
+
+检查 GPU 和驱动：
+
+```bash
+nvidia-smi
+```
+
+检查内存和磁盘：
+
+```bash
+free -h
+df -h /
+```
+
+建议至少保留 20 GB 磁盘空间。模型本身约占 9.3 GB。
+
+如果 `nvidia-smi` 失败，先安装云厂商推荐的 NVIDIA 驱动。
+
+安装驱动后重启服务器。确认 `nvidia-smi` 正常后再安装 Ollama。
+
+### 6.2 安装 Ollama
+
+执行官方 Linux 安装脚本：
+
+```bash
+curl -fsSL https://ollama.com/install.sh | sh
+```
+
+确认命令和版本：
+
+```bash
+command -v ollama
+ollama --version
+```
+
+确认 systemd 服务：
+
+```bash
+systemctl status ollama --no-pager
+systemctl is-enabled ollama
+systemctl is-active ollama
+```
+
+如果服务没有启动，执行：
+
+```bash
+systemctl enable --now ollama
+```
+
+检查本机 API：
+
+```bash
+curl -fsS http://127.0.0.1:11434/api/version
+```
+
+Linux 默认模型目录为：
+
+```text
+/usr/share/ollama/.ollama/models
+```
+
+### 6.3 配置 24GB GPU 运行参数
+
+默认情况下，Ollama 只监听 `127.0.0.1:11434`。
+
+Onyx 在另一台服务器时，需要监听内网地址。
+
+使用 systemd 覆盖文件，不要直接修改安装程序创建的服务文件：
+
+```bash
+systemctl edit ollama.service
+```
+
+加入以下内容：
+
+```ini
+[Service]
+Environment="OLLAMA_HOST=0.0.0.0:11434"
+Environment="OLLAMA_KEEP_ALIVE=15m"
+Environment="OLLAMA_MAX_LOADED_MODELS=1"
+Environment="OLLAMA_NUM_PARALLEL=1"
+Environment="OLLAMA_FLASH_ATTENTION=1"
+```
+
+这些设置有以下作用：
+
+- 一次只加载一个模型。
+- 每个模型一次只处理一个请求。
+- 模型空闲 15 分钟后可以释放。
+- Flash Attention 可降低长上下文的显存需求。
+
+保存文件后重新加载服务：
+
+```bash
+systemctl daemon-reload
+systemctl restart ollama
+```
+
+确认环境变量已经生效：
+
+```bash
+systemctl show ollama -p Environment --no-pager
+ss -lntp | grep ':11434'
+```
+
+24GB GPU 应先使用默认的 `f16` KV Cache。
+
+如果 20K 上下文仍然显存不足，可以加入以下可选设置：
+
+```ini
+Environment="OLLAMA_KV_CACHE_TYPE=q8_0"
+```
+
+`q8_0` KV Cache 的显存约为 `f16` 的一半。它可能带来很小的精度变化。
+
+修改后执行：
+
+```bash
+systemctl daemon-reload
+systemctl restart ollama
+```
+
+### 6.4 限制网络访问
+
+Ollama API 默认没有业务层身份验证。
+
+不要允许整个公网访问 TCP `11434`。
+
+优先使用以下任一方式：
+
+1. 让 Onyx 和 Ollama 使用同一私有网络。
+2. 使用 WireGuard 或 Tailscale。
+3. 使用云安全组，只允许 Onyx 服务器访问 `11434`。
+4. 使用主机防火墙，只允许 Onyx 的固定来源 IP。
+
+使用 UFW 时，先保证 SSH 端口不会被阻止。
+
+示例规则如下：
+
+```bash
+ufw allow OpenSSH
+ufw allow from ONYX_SERVER_SOURCE_IP to any port 11434 proto tcp
+ufw deny 11434/tcp
+ufw status numbered
+```
+
+不要直接复制占位 IP。应填写 Ollama 实际看到的 Onyx 来源 IP。
+
+如果使用云安全组，应同时删除面向 `0.0.0.0/0` 的 `11434` 入站规则。
+
+### 6.5 下载 Qwen3 14B 基础模型
+
+拉取基础模型：
+
+```bash
+ollama pull qwen3:14b
+```
+
+检查模型：
+
+```bash
+ollama list
+ollama show qwen3:14b --parameters
+```
+
+基础模型约占 9.3 GB。实际大小可能随上游模型版本变化。
+
+### 6.6 创建 20K RAG 模型
+
+创建配置目录：
+
+```bash
+install -d -m 0755 /opt/ollama-models/qwen3-14b-20k
+cd /opt/ollama-models/qwen3-14b-20k
+```
+
+创建 `Modelfile`：
 
 ```text
 FROM qwen3:14b
 
+SYSTEM """
+你是一个基于知识库检索结果回答问题的助手。
+只根据提供的知识库内容回答。
+资料不足时明确说明，不得编造。
+回答应保留来源引用。
+除非任务确实需要，不要展示冗长的推理过程。
+"""
+
 PARAMETER num_ctx 20480
-PARAMETER temperature 0.1
 PARAMETER num_predict 1024
-
-SYSTEM 你是一个基于知识库检索结果回答问题的助手。只根据提供的知识库内容回答。资料不足时明确说明，不得编造。回答需要保留来源引用。
+PARAMETER temperature 0.1
+PARAMETER top_k 20
+PARAMETER top_p 0.8
+PARAMETER repeat_penalty 1.05
 ```
 
-创建模型：
+创建自定义模型：
 
 ```bash
-ollama create qwen3-custom:14b-20k -f Modelfile
+ollama create onyx-qwen3-14b-20k:latest -f Modelfile
+```
+
+确认模型和参数：
+
+```bash
 ollama list
+ollama show onyx-qwen3-14b-20k:latest --parameters
 ```
 
-运行一次模型：
+预期参数至少包含：
 
-```bash
-ollama run qwen3-custom:14b-20k '请回答：测试成功'
+```text
+temperature       0.1
+top_k             20
+top_p             0.8
+num_ctx           20480
+num_predict       1024
+repeat_penalty    1.05
 ```
 
-查看 GPU 显存：
+### 6.7 测试模型生成
+
+先执行命令行测试：
 
 ```bash
-nvidia-smi
+ollama run onyx-qwen3-14b-20k:latest \
+  '请用一句话回答：知识库检索测试成功。'
+```
+
+再执行 API 测试：
+
+```bash
+curl -fsS http://127.0.0.1:11434/api/chat \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "model": "onyx-qwen3-14b-20k:latest",
+    "messages": [
+      {"role": "user", "content": "请回答：API 测试成功"}
+    ],
+    "stream": false
+  }'
+```
+
+测试后查看加载状态：
+
+```bash
 ollama ps
+nvidia-smi
 ```
 
-不要把 Ollama 的 `11434` 端口直接暴露到公网。
+`ollama ps` 的 `PROCESSOR` 应显示 `100% GPU`。
 
-应使用内网、VPN、安全组或防火墙限制访问来源。
+如果显示 CPU/GPU 混合，则模型或上下文可能超过可用显存。
 
-### 6.2 在 Onyx 中添加模型
+### 6.8 从 Onyx 服务器测试网络
+
+登录 Onyx 服务器。使用 Ollama 的私有地址执行：
+
+```bash
+curl -fsS http://OLLAMA_PRIVATE_IP:11434/api/version
+```
+
+测试模型列表：
+
+```bash
+curl -fsS http://OLLAMA_PRIVATE_IP:11434/api/tags
+```
+
+测试一次生成：
+
+```bash
+curl -fsS http://OLLAMA_PRIVATE_IP:11434/api/chat \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "model": "onyx-qwen3-14b-20k:latest",
+    "messages": [
+      {"role": "user", "content": "请回答：Onyx 到 Ollama 网络正常"}
+    ],
+    "stream": false
+  }'
+```
+
+如果连接失败，检查以下项目：
+
+```bash
+systemctl status ollama --no-pager
+ss -lntp | grep ':11434'
+journalctl -u ollama --since '10 minutes ago' --no-pager
+```
+
+同时检查云安全组、主机防火墙和私有网络路由。
+
+### 6.9 在 Onyx 中添加模型
 
 在 Onyx 管理界面打开 LLM Provider 设置。
 
@@ -386,13 +666,85 @@ ollama ps
 | 项目 | 值 |
 | --- | --- |
 | Provider | Ollama |
-| Base URL | `http://Ollama内网地址:11434` |
-| Model name | `qwen3-custom:14b-20k` |
+| Base URL | `http://OLLAMA_PRIVATE_IP:11434` |
+| Model name | `onyx-qwen3-14b-20k:latest` |
 | Max input tokens | `20480` |
 
 Onyx 的 Max input tokens 必须与 Ollama 的 `num_ctx` 一致。
 
 不要为 20K 模型填写 `262144`。过大的值会增加 KV Cache 和显存占用。
+
+将该模型设为默认聊天模型。保存后新建会话执行测试。
+
+### 6.10 预热、卸载和升级
+
+发送空请求可以预热模型：
+
+```bash
+curl -fsS http://127.0.0.1:11434/api/generate \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "model": "onyx-qwen3-14b-20k:latest",
+    "keep_alive": "15m"
+  }'
+```
+
+手动卸载模型并释放显存：
+
+```bash
+ollama stop onyx-qwen3-14b-20k:latest
+```
+
+升级 Ollama 前先记录版本：
+
+```bash
+ollama --version
+```
+
+Linux 升级命令与安装命令相同：
+
+```bash
+curl -fsSL https://ollama.com/install.sh | sh
+```
+
+不要直接在生产高峰期升级。升级后应重新执行 API、显存和 RAG 测试。
+
+### 6.11 Ollama 常见问题
+
+#### 模型只使用 CPU
+
+检查 NVIDIA 驱动：
+
+```bash
+nvidia-smi
+journalctl -u ollama --since '10 minutes ago' --no-pager
+ollama ps
+```
+
+#### 24GB GPU 显存不足
+
+按以下顺序处理：
+
+1. 确认 `OLLAMA_MAX_LOADED_MODELS=1`。
+2. 确认 `OLLAMA_NUM_PARALLEL=1`。
+3. 停止其他已加载模型。
+4. 确认上下文为 `20480`，不是 `262144`。
+5. 启用 `OLLAMA_FLASH_ATTENTION=1`。
+6. 最后尝试 `OLLAMA_KV_CACHE_TYPE=q8_0`。
+
+#### 首次回答很慢
+
+首次请求需要加载约 9.3 GB 模型权重。
+
+使用预热请求，并设置合理的 `OLLAMA_KEEP_ALIVE`。
+
+#### Onyx 报超时
+
+先在 Ollama 本机测试相同模型。
+
+然后检查 Onyx 到 Ollama 的延迟和防火墙。
+
+确认没有其他模型占用 GPU。检查 `ollama ps` 和 `nvidia-smi`。
 
 ## 7. RAG 参数
 
