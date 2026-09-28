@@ -12,6 +12,7 @@ from onyx.context.search.models import (
 from onyx.llm.interfaces import LLM
 from onyx.llm.multi_llm import LLMTimeoutError
 from onyx.secondary_llm_flows.document_filter import (
+    backfill_selected_sections,
     classify_section_relevance,
     select_sections_for_expansion,
 )
@@ -22,14 +23,14 @@ def _noop_span() -> Iterator[MagicMock]:
     yield MagicMock()
 
 
-def _make_section() -> InferenceSection:
+def _make_section(document_id: str = "doc-1", chunk_id: int = 0) -> InferenceSection:
     chunk = InferenceChunk(
-        document_id="doc-1",
-        chunk_id=0,
+        document_id=document_id,
+        chunk_id=chunk_id,
         content="section content",
         source_type=DocumentSource.MOCK_CONNECTOR,
-        semantic_identifier="sem-doc-1",
-        title="doc-1",
+        semantic_identifier=f"sem-{document_id}",
+        title=document_id,
         boost=1,
         score=0.5,
         hidden=False,
@@ -152,3 +153,49 @@ def test_select_sections_for_expansion_passes_timeout_on_success(
 
     assert selected == sections
     assert invoke.call_args.kwargs["timeout_override"] == SECONDARY_LLM_FLOW_TIMEOUT_S
+
+
+def test_backfill_selected_sections_prefers_new_documents() -> None:
+    ranked = [
+        _make_section("doc-1", 0),
+        _make_section("doc-1", 1),
+        _make_section("doc-2", 0),
+        _make_section("doc-3", 0),
+    ]
+
+    result = backfill_selected_sections(
+        selected_sections=[ranked[0]],
+        ranked_sections=ranked,
+        minimum_sections=3,
+        max_sections=4,
+    )
+
+    assert [section.center_chunk.document_id for section in result] == [
+        "doc-1",
+        "doc-2",
+        "doc-3",
+    ]
+
+
+@patch("onyx.secondary_llm_flows.document_filter.record_llm_response")
+@patch(
+    "onyx.secondary_llm_flows.document_filter.llm_generation_span",
+    return_value=_noop_span(),
+)
+def test_select_sections_backfills_a_strict_llm_result(
+    _span: MagicMock, _record: MagicMock
+) -> None:
+    sections = [_make_section(f"doc-{index}") for index in range(4)]
+    response = MagicMock()
+    response.choice.message.content = "[0]"
+    llm = _make_llm(MagicMock(return_value=response))
+
+    selected, _doc_ids = select_sections_for_expansion(
+        sections=sections,
+        user_query="list all cases",
+        llm=llm,
+        max_sections=4,
+        minimum_sections=3,
+    )
+
+    assert selected == sections[:3]

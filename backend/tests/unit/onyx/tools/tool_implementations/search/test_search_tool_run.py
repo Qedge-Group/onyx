@@ -8,12 +8,28 @@ from onyx.context.search.models import BaseFilters
 from onyx.server.query_and_chat.placement import Placement
 from onyx.server.query_and_chat.streaming_models import SearchToolFilterDelta
 from onyx.tools.models import ChatMinimalTextMessage, SearchToolOverrideKwargs
-from onyx.tools.tool_implementations.search.search_tool import SearchTool
+from onyx.tools.tool_implementations.search.search_tool import (
+    SearchTool,
+    calculate_llm_chunk_limit,
+    is_high_recall_query,
+)
 
 MODULE = "onyx.tools.tool_implementations.search.search_tool"
 
 # What decide_search_scope returns: the scope to apply now (or None for everything).
 ScopeDecision = list[DocumentSource] | None
+
+
+def test_high_recall_query_detection() -> None:
+    assert is_high_recall_query("请总结知识库中所有客户案例")
+    assert is_high_recall_query("官网有哪些企业出海解决方案？")
+    assert is_high_recall_query("List every supported integration")
+    assert not is_high_recall_query("Sitecore 是什么？")
+
+
+def test_chunk_limit_respects_small_context_window() -> None:
+    assert calculate_llm_chunk_limit(25, 8192) == 6
+    assert calculate_llm_chunk_limit(25, 20480) == 25
 
 
 def _make_tool(

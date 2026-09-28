@@ -34,6 +34,7 @@ so that the rest of the code can persist it, render it in the UI, etc. The respo
 refer to by using matching keywords to other parts of the prompt and reminders.
 """
 
+import re
 import time
 from collections.abc import Callable
 from typing import Any, cast
@@ -42,7 +43,13 @@ from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from onyx.chat.emitter import Emitter
-from onyx.configs.chat_configs import MAX_CHUNKS_FED_TO_CHAT
+from onyx.configs.chat_configs import (
+    MAX_CHUNKS_FED_TO_CHAT,
+    SEARCH_CHUNK_TOKEN_OVERHEAD,
+    SEARCH_CONTEXT_TOKEN_RESERVE,
+    SEARCH_HIGH_RECALL_SELECTED_SECTIONS,
+    SEARCH_MIN_SELECTED_SECTIONS,
+)
 from onyx.configs.constants import DocumentSource, FederatedConnectorSource
 from onyx.context.search.federated.slack_search import slack_retrieval
 from onyx.context.search.models import (
@@ -141,6 +148,30 @@ from shared_configs.configs import (
 logger = setup_logger()
 
 QUERIES_FIELD = "queries"
+
+_HIGH_RECALL_PATTERNS = (
+    re.compile(r"全部|所有|逐一|完整(?:列出|罗列)|尽可能多|有哪些|列出|罗列|盘点|清单|汇总"),
+    re.compile(
+        r"\b(all|every|list|enumerate|catalog|inventory|comprehensive|exhaustive)\b",
+        re.IGNORECASE,
+    ),
+)
+
+
+def is_high_recall_query(query: str) -> bool:
+    """Return True when the user asks for broad source coverage."""
+    return any(pattern.search(query) for pattern in _HIGH_RECALL_PATTERNS)
+
+
+def calculate_llm_chunk_limit(
+    requested_limit: int,
+    max_input_tokens: int,
+) -> int:
+    """Fit search chunks into the model context and keep a fixed reserve."""
+    usable_tokens = max(0, max_input_tokens - SEARCH_CONTEXT_TOKEN_RESERVE)
+    estimated_chunk_tokens = DOC_EMBEDDING_CONTEXT_SIZE + SEARCH_CHUNK_TOKEN_OVERHEAD
+    context_limit = max(1, usable_tokens // estimated_chunk_tokens)
+    return max(1, min(requested_limit, context_limit))
 
 
 class QueryExpansionAndScope(BaseModel):
@@ -1081,13 +1112,25 @@ class SearchTool(Tool[SearchToolOverrideKwargs]):
 
         token_counter = get_llm_token_counter(self.llm)
 
+        requested_llm_chunks = (
+            override_kwargs.max_llm_chunks or MAX_CHUNKS_FED_TO_CHAT
+        )
+        effective_llm_chunks = calculate_llm_chunk_limit(
+            requested_limit=requested_llm_chunks,
+            max_input_tokens=self.llm.config.max_input_tokens,
+        )
+        high_recall_query = is_high_recall_query(secondary_flows_user_query)
+        minimum_sections = (
+            SEARCH_HIGH_RECALL_SELECTED_SECTIONS
+            if high_recall_query
+            else SEARCH_MIN_SELECTED_SECTIONS
+        )
+
         # Trim sections to fit within token budget before LLM selection
         # This is to account for very short chunks flooding the search context
         # Only consider MAX_CHUNKS_FOR_RELEVANCE chunks per section to avoid flooding from
         # documents with many matching sections
-        max_tokens_for_selection = (
-            override_kwargs.max_llm_chunks or MAX_CHUNKS_FED_TO_CHAT
-        ) * DOC_EMBEDDING_CONTEXT_SIZE
+        max_tokens_for_selection = effective_llm_chunks * DOC_EMBEDDING_CONTEXT_SIZE
 
         # This is approximate since it doesn't build the exact string of the call below
         # Some things are estimated and may be under (like the metadata tokens)
@@ -1107,6 +1150,8 @@ class SearchTool(Tool[SearchToolOverrideKwargs]):
             user_query=secondary_flows_user_query,
             llm=self.llm,
             max_chunks_per_section=MAX_CHUNKS_FOR_RELEVANCE,
+            try_to_fill_to_max=high_recall_query,
+            minimum_sections=min(minimum_sections, len(sections_for_selection)),
         )
 
         # End timing for LLM document selection
@@ -1199,7 +1244,7 @@ class SearchTool(Tool[SearchToolOverrideKwargs]):
         docs_str, citation_mapping = convert_inference_sections_to_llm_string(
             top_sections=merged_sections,
             citation_start=override_kwargs.starting_citation_num,
-            limit=override_kwargs.max_llm_chunks,
+            limit=effective_llm_chunks,
             include_document_id=False,
             include_link=override_kwargs.include_link,
             note=scope_note or None,
@@ -1212,6 +1257,22 @@ class SearchTool(Tool[SearchToolOverrideKwargs]):
             format(overall_elapsed, ".3f"),
             format(document_selection_elapsed, ".3f"),
             format(document_expansion_elapsed, ".3f"),
+        )
+        logger.info(
+            "event=rag_search_pipeline high_recall=%s query_count=%s "
+            "retrieved_chunks=%s fused_chunks=%s sections=%s "
+            "selection_candidates=%s selected=%s expanded=%s merged=%s "
+            "llm_chunk_limit=%s",
+            high_recall_query,
+            len(search_functions),
+            sum(len(results) for results in all_search_results),
+            len(top_chunks),
+            len(top_sections),
+            len(sections_for_selection),
+            len(selected_sections),
+            len(expanded_sections),
+            len(merged_sections),
+            effective_llm_chunks,
         )
 
         llm_facing_response = docs_str
