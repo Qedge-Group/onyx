@@ -152,6 +152,9 @@ QUERIES_FIELD = "queries"
 _HIGH_RECALL_PATTERNS = (
     re.compile(r"全部|所有|逐一|完整(?:列出|罗列)|尽可能多|有哪些|列出|罗列|盘点|清单|汇总"),
     re.compile(
+        r"(?:总结|概括).{0,16}(?:知识库|站点|网站).{0,24}(?:案例|文档|资料|条目)"
+    ),
+    re.compile(
         r"\b(all|every|list|enumerate|catalog|inventory|comprehensive|exhaustive)\b",
         re.IGNORECASE,
     ),

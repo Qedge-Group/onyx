@@ -22,6 +22,7 @@ ScopeDecision = list[DocumentSource] | None
 
 def test_high_recall_query_detection() -> None:
     assert is_high_recall_query("请总结知识库中所有客户案例")
+    assert is_high_recall_query("请总结知识库中已收录的客户案例，并提供对应引用。")
     assert is_high_recall_query("官网有哪些企业出海解决方案？")
     assert is_high_recall_query("List every supported integration")
     assert not is_high_recall_query("Sitecore 是什么？")
