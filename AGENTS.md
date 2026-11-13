@@ -1,3 +1,17 @@
+# QEdge mandatory branch policy
+
+Follow `QEDGE_WORKFLOW.md` before any code edit, commit, branch creation, pull request, or deployment.
+
+- Use `dev` as the only custom integration base.
+- Start new work from current `origin/dev`, then open a PR into `dev` and merge it after validation.
+- Never start QEdge feature or fix work from `main`.
+- Keep Onyx `main` equal to official upstream. It must not contain custom commits.
+- Keep Search `main` as a release branch. Its work also starts from `dev`.
+- Preserve existing archive branches and deployment records.
+- Ignore `codex/rag-quality-14b` unless the owner explicitly reopens it.
+- Do not automatically rebase custom work onto `origin/main`. Upstream upgrades use an `upgrade/*` branch from `dev`.
+- These QEdge rules override conflicting upstream startup instructions that require rebasing onto `main`.
+
 # PROJECT KNOWLEDGE BASE
 
 This file provides guidance to AI agents when working with code in this repository.
