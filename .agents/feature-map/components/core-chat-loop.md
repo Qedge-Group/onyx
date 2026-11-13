@@ -414,6 +414,8 @@ launching Playwright ad hoc.
 It uses one Flash synthesis call for ordinary questions and deeper analysis, with evidence-only prompts and validated citation numbers.
 Standalone questions exclude previous assistant answers. No evidence means no generation.
 Summary failures return a retry message, never raw excerpts.
+Response language follows the latest user question, independent of the Agent language preference.
+The optional `response_language` request field supplies an English or Chinese fallback for language-neutral company-name queries.
 `process_message.py` retains model selection bookkeeping, writer-thread persistence, and the normal emitter contract.
 Search emits `SectionEnd`; saved tool responses retain the rich `SearchDocsResponse` needed for conversation replay.
 File, Project, incognito, and multi-model turns retain the standard pipeline.

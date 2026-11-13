@@ -1,6 +1,6 @@
 from datetime import datetime
 from enum import Enum
-from typing import Any
+from typing import Any, Literal
 from uuid import UUID
 
 from pydantic import BaseModel, model_validator
@@ -104,6 +104,8 @@ class ChatFeedbackRequest(BaseModel):
 # experienced team member. It is very important to 1. avoid bloat and 2. that this remains backwards compatible across versions.
 class SendMessageRequest(BaseModel):
     message: str
+    # Fallback for language-neutral questions in the custom knowledge route.
+    response_language: Literal["en", "zh"] | None = None
 
     llm_override: LLMOverride | None = None
     # For multi-model mode: up to 3 LLM overrides to run in parallel.

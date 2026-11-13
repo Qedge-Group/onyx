@@ -38,7 +38,10 @@ Users can explore what Onyx indexed with [Internal Search](/overview/core_featur
 This Beta deployment adds a knowledge-only route for Agents listed in `QEDGE_RAG_PERSONAS`.
 Ordinary questions and detailed analysis both use the configured Flash model.
 The model combines retrieved passages into a summary with inline source citations.
-It does not display raw excerpts as the answer.
+It does not display raw excerpts as the answer. Answers follow the question language,
+even when the Agent has a fixed language preference.
+The optional `response_language` chat request field accepts `en` or `zh` as a fallback for language-neutral questions.
+A query containing only `QEdge` retrieves company information instead of treating the company name as an empty query.
 
 The route retrieves fresh documents for each request and preserves user permissions and Document Set filters.
 Previous assistant answers are not factual evidence.

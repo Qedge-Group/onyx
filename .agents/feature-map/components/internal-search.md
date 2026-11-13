@@ -506,4 +506,6 @@ File, Project, incognito, and multi-model turns retain the standard pipeline.
 Candidate retrieval preserves fresh ACL and Document Set checks. Only relevance scores use `CacheBackend`, with a 120-second lifetime.
 `backend/onyx/db/knowledge_rag.py` owns provider and indexed-case metadata reads.
 A missing dedicated reranker uses lexical filtering; it does not restore deleted provider credentials.
+Exact QEdge company-name queries expand to English and Chinese company terms before lexical filtering.
+Unrelated questions retain their original relevance checks; the company-name expansion does not apply to them.
 Regression checks cover Starter summaries, fresh and same-session repeats, unsupported questions, scope boundaries, streaming, and replay.

@@ -10,3 +10,4 @@ COPY backend/onyx/server/query_and_chat/chat_backend.py /app/onyx/server/query_a
 COPY backend/onyx/tools/models.py /app/onyx/tools/models.py
 COPY backend/onyx/tools/tool_implementations/search/search_tool.py /app/onyx/tools/tool_implementations/search/search_tool.py
 COPY backend/onyx/tracing/flows.py /app/onyx/tracing/flows.py
+COPY backend/onyx/server/query_and_chat/models.py /app/onyx/server/query_and_chat/models.py

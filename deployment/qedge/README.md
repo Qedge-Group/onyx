@@ -1,68 +1,39 @@
-# QEdge Beta RAG source archive
+# QEdge Beta RAG customization
 
-This branch preserves the final Beta patch from 2026-11-13.
-The application files match the server source byte for byte.
-The source baseline is Onyx v5.1.2, commit `6b627422c711802fee78b89dda3e25ca0f48ec7e`.
-This branch does not rebase onto the older fork main.
+The original deployment snapshot is commit `1ea2c7b96e574b1a4d4aa81feaf1b7162a2dee65`.
+It uses Onyx v5.1.2 as its base.
 
-## Trace the source
+The original patch and `source-provenance.json` describe that immutable snapshot.
+Later fixes have separate source manifests and Git commits.
+See [the brand-query and language fix](brand-query-language-fix.md) for the current release.
 
-- `patches/onyx-v5.1.2-rag-summary.patch` is the exact downloaded server patch.
-- `source-provenance.json` records its SHA-256 and all 17 source file hashes.
-- The same 17 files are applied as normal source changes in this branch.
-- Runtime secrets, database backups, and host-specific Compose overrides are excluded.
-
-Patch SHA-256:
-
-```text
-ae5c92301897de4f78af87642d5c81b31554ccb1eb773d5f21c034933b2beaba
-```
-
-To apply the original patch separately, use a clean checkout at the baseline commit.
-Do not apply it again on this branch.
-
-```sh
-git checkout 6b627422c711802fee78b89dda3e25ca0f48ec7e
-git apply --check /path/to/onyx-v5.1.2-rag-summary.patch
-git apply /path/to/onyx-v5.1.2-rag-summary.patch
-```
-
-## Build the backend overlay
+## Build
 
 Run from the repository root:
 
 ```sh
-docker build -f deployment/qedge/Dockerfile.rag-stable -t onyx-backend:v5.1.2-rag-stable .
+docker build -f deployment/qedge/Dockerfile.rag-stable -t onyx-backend:v5.1.2-brand-language-20261113 .
 ```
 
-The Dockerfile copies all nine changed backend modules onto the v5.1.2 backend image.
-It is a build recipe for the archived source. This archive task did not rebuild or redeploy the live service.
-Set `ONYX_BASE_IMAGE` with a build argument if an approved image digest is available.
+The Dockerfile copies ten changed backend modules onto the v5.1.2 backend image.
+Set the `ONYX_BASE_IMAGE` build argument to use an approved image digest.
 
-Both ordinary summaries and deeper analysis use the configured Flash model.
 Read `documentation/admins/managing_features/rag_and_search.mdx` for the custom route.
-The two environment templates document its settings.
-Enabling the route requires explicit Agent IDs and an existing model provider.
-No provider credentials are stored in this branch.
-Use the HTTP-only Nginx template only behind the intended TLS terminator and network access controls.
+The environment templates document its settings.
+Provider credentials and Agent IDs remain deployment configuration.
+This repository does not contain runtime secrets or host-specific Compose overrides.
 
-## Validation
+## Validate
 
-During archive preparation:
-
-- The patch applied cleanly to the exact baseline.
-- All 17 restored file Git blobs matched the patch postimages.
-- All 17 restored SHA-256 hashes matched the current server source.
-- All changed Python files passed local syntax parsing.
-- The patch passed a credential-literal review.
-
-Earlier deployment validation recorded 25 passing unit tests, 19 question cases, and five integration checks.
-These are historical results from the deployment task, not fresh archive test results.
-A fresh test attempt lost its SSH connection before completion; no fresh pass is claimed.
-The original patch retains its exact formatting, including a trailing blank line in the HTTP-only template.
-
-With the repository dependencies installed, run the included regression suite from the root:
+With the repository dependencies installed, run:
 
 ```sh
 PYTHONPATH=backend uv run python -m unittest test_knowledge_rag
 ```
+
+## Original patch
+
+`patches/onyx-v5.1.2-rag-summary.patch` is the exact downloaded server patch.
+Its SHA-256 is `ae5c92301897de4f78af87642d5c81b31554ccb1eb773d5f21c034933b2beaba`.
+Apply it only to a clean checkout of baseline commit `6b627422c711802fee78b89dda3e25ca0f48ec7e`.
+Do not apply it again on a branch that already contains the customization.

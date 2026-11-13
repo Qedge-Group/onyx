@@ -9,7 +9,7 @@ import json
 import os
 import re
 import time
-from typing import TYPE_CHECKING, TypedDict, cast
+from typing import TYPE_CHECKING, Literal, TypedDict, cast
 from urllib.parse import urlsplit
 from uuid import uuid4
 
@@ -94,6 +94,7 @@ def _load_min_relevance(raw: str) -> float:
 
 PERSONAS = _load_personas(os.environ.get("QEDGE_RAG_PERSONAS", ""))
 MIN_RELEVANCE = _load_min_relevance(os.environ.get("QEDGE_RAG_MIN_RELEVANCE", "0.20"))
+_COMPANY_NAME = re.compile(r"\s*qedge\s*[?？.!！。]*\s*", re.IGNORECASE)
 _DEEP = re.compile(
     r"深入|深层|详细分析|分析.{0,12}(?:原因|差异|风险)|比较|对比|为什么|如何选择|制定.{0,8}方案|推导|evaluate|compare|trade.?off|why\b|in.depth|recommend.{0,12}strategy",
     re.IGNORECASE,
@@ -214,6 +215,11 @@ def focus_query(question: str) -> str:
 
 
 def lexical_queries(question: str) -> list[str]:
+    if _COMPANY_NAME.fullmatch(question):
+        return [
+            "QEdge company services solutions",
+            "QEdge 公司 简介 服务 解决方案",
+        ]
     if re.search(r"客户案例|case studies", question, re.IGNORECASE):
         return [
             "案例 项目案例",
@@ -513,6 +519,16 @@ def excerpt(
     return (" … ".join(s for _, s in chosen) if chosen else text)[:limit].strip()
 
 
+def answer_language(
+    question: str, fallback: Literal["en", "zh"] | None = None
+) -> Literal["en", "zh"]:
+    if re.search(r"[\u4e00-\u9fff]", question):
+        return "zh"
+    if _COMPANY_NAME.fullmatch(question):
+        return fallback or "zh"
+    return "en" if re.search(r"[a-z]", question, re.IGNORECASE) else fallback or "zh"
+
+
 def run_knowledge_turn(
     *,
     emitter: Emitter,
@@ -523,11 +539,23 @@ def run_knowledge_turn(
     llm: LLM,
     force_deep: bool = False,
     include_citations: bool = True,
+    response_language: Literal["en", "zh"] | None = None,
 ) -> None:
     start = time.monotonic()
     question = resolve_question(history)
-    english = persona.id == 1 or (
-        persona.id == 0 and not re.search(r"[\u4e00-\u9fff]", question)
+    latest_user = next(
+        (m for m in reversed(history) if m.message_type == MessageType.USER), None
+    )
+    current_question = resolve_question([latest_user]) if latest_user else question
+    english = answer_language(current_question, response_language) == "en"
+    synthesis_question = (
+        (
+            "Introduce QEdge and its main services."
+            if english
+            else "请介绍 QEdge 公司及其主要服务。"
+        )
+        if _COMPANY_NAME.fullmatch(question)
+        else question
     )
     search = cast(
         "SearchTool | None",
@@ -655,6 +683,8 @@ def run_knowledge_turn(
                 + "\n"
                 + (persona.task_prompt or "")
                 + "\nFinal format: a synthesized summary, never excerpts. Cite evidence using exactly [N], where N is the supplied document number. Do not invent numbers or sources."
+                + "\nThe response language rule takes precedence over conflicting Agent language preferences: "
+                + ("respond in English." if english else "仅使用简体中文回答。")
             )
             numbers: set[int] = set()
             try:
@@ -666,7 +696,11 @@ def run_knowledge_turn(
                         messages=[
                             UserMessage(
                                 content=json.dumps(
-                                    {"question": question, "evidence": evidence},
+                                    {
+                                        "question": synthesis_question,
+                                        "response_language": "en" if english else "zh",
+                                        "evidence": evidence,
+                                    },
                                     ensure_ascii=False,
                                 )
                             )
@@ -737,6 +771,7 @@ def run_knowledge_turn(
     state.set_pre_answer_processing_time(time.monotonic() - start)
     state.set_request_params(
         {
+            "qedge_response_language": "en" if english else "zh",
             "qedge_rag_mode": (
                 "deep_summary"
                 if requires_synthesis(question, force_deep)

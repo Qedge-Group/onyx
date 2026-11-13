@@ -1414,6 +1414,7 @@ def _run_models(
                     llm=model_llm,
                     force_deep=setup.new_msg_req.deep_research,
                     include_citations=setup.new_msg_req.include_citations,
+                    response_language=setup.new_msg_req.response_language,
                 )
             elif n_models == 1 and setup.new_msg_req.deep_research:
                 if setup.chat_session_project_id:

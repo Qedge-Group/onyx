@@ -1,0 +1,38 @@
+{
+  "baseCommit": "1ea2c7b96e574b1a4d4aa81feaf1b7162a2dee65",
+  "image": "onyx-backend:v5.1.2-brand-language-20261113",
+  "files": [
+    {
+      "path": "backend/onyx/chat/knowledge_rag.py",
+      "sha256": "4a8ac37d9a780ae60572dda7ea38b0ed70f56c94f9fc9503159961087790764f"
+    },
+    {
+      "path": "backend/onyx/chat/process_message.py",
+      "sha256": "b43785483a75d19c335d7758ad7640c9993a670fc628ce0b2fcdf5ce29aedd04"
+    },
+    {
+      "path": "backend/onyx/server/query_and_chat/models.py",
+      "sha256": "4bda7bad258a3ddcc26b9bef42e7bd933b02b49f915ad66c5507a2f2ffe5d1bc"
+    },
+    {
+      "path": "test_knowledge_rag.py",
+      "sha256": "92700abd82a04edbbccf09e7fe77b81383849b1a66bfa099ac77248ef08466dc"
+    },
+    {
+      "path": ".agents/feature-map/components/core-chat-loop.md",
+      "sha256": "fcad7f10ae56935c86864213ab8515681a8850e7d0a8bbfc1479da8368a5752c"
+    },
+    {
+      "path": ".agents/feature-map/components/internal-search.md",
+      "sha256": "818d25fe610b280fc83341f338ae9f8a2d9f050f04bc16d274d707597a045508"
+    },
+    {
+      "path": "documentation/admins/managing_features/rag_and_search.mdx",
+      "sha256": "4a840a80b9ba9df21fa2f899d4fdd1cc868c1be524940da35129a62529d2cbdd"
+    },
+    {
+      "path": "deployment/qedge/Dockerfile.rag-stable",
+      "sha256": "61b3e61f49e18da0c9081d76a731007677a85257cafa4b0255c346c8db15186a"
+    }
+  ]
+}
