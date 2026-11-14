@@ -101,6 +101,17 @@ class KnowledgeTests(unittest.TestCase):
             "请根据已收录资料介绍", str(llm.invoke.call_args.args[0].messages)
         )
 
+    def test_topic_request_is_not_treated_as_a_page_title(self):
+        from onyx.chat.knowledge_rag import focus_query
+
+        self.assertEqual(focus_query("了解核心解决方案"), "核心解决方案")
+        _, llm, _, _ = self.run_turn("了解核心解决方案")
+        request = llm.invoke.call_args.args[0]
+        self.assertIn("主要内容与用途", str(request.messages))
+        self.assertIn("not exact page or section titles", request.system_prompt)
+        self.assertEqual(request.options.max_tokens, 750)
+        self.assertTrue(requires_synthesis("针对 AI 与内容管理集成展开讲讲呢"))
+
     def test_answer_voice_and_identity_are_not_fixed_to_qedge(self):
         _, llm, _, _ = self.run_turn("Sitecore")
         system = llm.invoke.call_args.args[0].system_prompt
@@ -270,7 +281,7 @@ class KnowledgeTests(unittest.TestCase):
         self.assertIn("AI 与内容管理集成", q)
         self.assertIn(
             "AI CMS content management integration Sitecore Stream",
-            lexical_queries(q),
+            " ".join(lexical_queries(q)),
         )
         h[-1] = message("请深入比较这些实施方式")
         q = resolve_question(h)

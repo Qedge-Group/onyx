@@ -79,9 +79,9 @@ def _load_min_relevance(raw: str) -> float:
 
 PERSONAS = _load_personas(os.environ.get("QEDGE_RAG_PERSONAS", ""))
 MIN_RELEVANCE = _load_min_relevance(os.environ.get("QEDGE_RAG_MIN_RELEVANCE", "0.20"))
-_ENTITY_ONLY = re.compile(r"\s*[\w][\w.-]{1,60}[?？.!！。]*\s*", re.IGNORECASE)
+_ENTITY_ONLY = re.compile(r"\s*[a-z0-9][a-z0-9._-]{1,60}[?？.!！。]*\s*", re.IGNORECASE)
 _DEEP = re.compile(
-    r"深入|深层|详细分析|分析.{0,12}(?:原因|差异|风险)|比较|对比|为什么|如何选择|制定.{0,8}方案|推导|evaluate|compare|trade.?off|why\b|in.depth|recommend.{0,12}strategy",
+    r"深入|深层|展开讲讲|详细讲讲|详细介绍|进一步解释|详细分析|分析.{0,12}(?:原因|差异|风险)|比较|对比|为什么|如何选择|制定.{0,8}方案|推导|evaluate|compare|trade.?off|why\b|in.depth|recommend.{0,12}strategy",
     re.IGNORECASE,
 )
 _FOLLOWUP = re.compile(
@@ -91,7 +91,7 @@ _FOLLOWUP = re.compile(
     re.IGNORECASE,
 )
 _ALIASES = [
-    (r"主要服务|主要解决方案|提供哪些|哪些服务", "services solutions capabilities"),
+    (r"主要服务|主要解决方案|核心解决方案|提供哪些|哪些服务", "services solutions capabilities"),
     (r"Sitecore", "Sitecore development implementation services"),
     (
         r"AI.{0,8}(?:内容管理|CMS)|(?:内容管理|CMS).{0,8}AI",
@@ -195,6 +195,7 @@ def focus_query(question: str) -> str:
             if re.search(r"[\u4e00-\u9fff]", question)
             else "customer case studies"
         )
+    question = re.sub(r"^(?:请)?(?:了解|介绍|说说|讲讲)(?:一下)?\s*", "", question).strip()
     text = re.sub(
         r"根据(?:已收录的)?(?:官网|网站)?资料[，,：:]?|请(?:介绍|总结)|(?:并|，并)(?:附上来源|提供对应引用)|知识库中(?:已收录的)?",
         "",
@@ -578,6 +579,11 @@ def synthesize_knowledge_answer(
         if _ENTITY_ONLY.fullmatch(question)
         else question
     )
+    synthesis_question = re.sub(
+        r"^(?:请)?(?:了解|介绍|说说|讲讲)(?:一下)?\s*(.+)$",
+        r"请介绍\1的主要内容与用途。",
+        synthesis_question,
+    )
     rich = response.details
     if response.is_error or not isinstance(rich, SearchDocsResponse):
         raise OnyxError(OnyxErrorCode.BAD_GATEWAY, "Invalid internal search response")
@@ -615,10 +621,10 @@ def synthesize_knowledge_answer(
                         question,
                         limit=3200
                         if requires_synthesis(question, force_deep)
-                        else 1800,
+                        else 1400,
                         max_passages=10
                         if requires_synthesis(question, force_deep)
-                        else 6,
+                        else 4,
                     ),
                 }
                 for item in available_evidence
@@ -630,10 +636,11 @@ def synthesize_knowledge_answer(
                 "Write a coherent, deduplicated summary in your own words; combine related facts across documents. "
                 "Do not output raw excerpts, block quotes, a source-by-source inventory, or an evidence heading. "
                 "Use short paragraphs and, only when helpful, a compact list of themes. "
+                "Interpret conversational requests as topic questions, not exact page or section titles. For example, 了解核心解决方案 asks what the main solutions are; it does not ask whether a page has that name. Only discuss page existence when explicitly asked. Speak naturally and answer the topic directly. Do not open with retrieval narration such as 根据已收录资料 or 根据现有证据, and do not add a knowledge-base disclaimer when the relevant facts are supported. "
                 + (
                     "Give a grounded comparison or analysis, explaining limitations. "
                     if requires_synthesis(question, force_deep)
-                    else "Keep straightforward answers brief. Add detail only when it helps answer the question; do not pad the response. "
+                    else "For a straightforward first answer, give a compact useful summary: about 150-280 Chinese characters or 80-150 English words, using less when sufficient. Keep examples relevant; leave further detail for follow-up questions. "
                 )
                 + (
                     "For a broad question about an organization's services or capabilities, answer directly and synthesize the main supported themes with useful examples. Choose paragraphs or a short list to fit the evidence; do not include partner-history facts unless asked. "
@@ -676,7 +683,7 @@ def synthesize_knowledge_answer(
                             reasoning_effort=ReasoningEffort.OFF,
                             max_tokens=1800
                             if requires_synthesis(question, force_deep)
-                            else 1100,
+                            else 750,
                         ),
                     ),
                     context=(context or GenerationContext()).model_copy(
