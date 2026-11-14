@@ -223,6 +223,8 @@ def focus_query(question: str) -> str:
 
 
 def lexical_queries(question: str) -> list[str]:
+    if re.search(r"开源|open[ -]source", question, re.IGNORECASE):
+        return [focus_query(question), "开源", "open source CMS"]
     if _ENTITY_ONLY.fullmatch(question):
         return [
             "organization company profile services solutions",
@@ -636,6 +638,7 @@ def synthesize_knowledge_answer(
                 "Write a coherent, deduplicated summary in your own words; combine related facts across documents. "
                 "Do not output raw excerpts, block quotes, a source-by-source inventory, or an evidence heading. "
                 "Use short paragraphs and, only when helpful, a compact list of themes. "
+                "Preserve explicit requirements such as open-source licensing. A generic project or a product comparison is not proof of a qualifying implementation case. When the evidence only partially addresses the request, briefly explain the supported part, state the specific missing qualification, and ask one useful clarification when needed. Cite related material without presenting it as a matching case. "
                 "Interpret conversational requests as topic questions, not exact page or section titles. For example, 了解核心解决方案 asks what the main solutions are; it does not ask whether a page has that name. Only discuss page existence when explicitly asked. Speak naturally and answer the topic directly. Do not open with retrieval narration such as 根据已收录资料 or 根据现有证据, and do not add a knowledge-base disclaimer when the relevant facts are supported. "
                 + (
                     "Give a grounded comparison or analysis, explaining limitations. "
