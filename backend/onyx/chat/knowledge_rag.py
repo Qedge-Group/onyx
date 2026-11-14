@@ -8,6 +8,7 @@ import hashlib
 import json
 import os
 import re
+import time
 from collections.abc import Sequence
 from typing import Literal, TypedDict, cast
 from urllib.parse import urlsplit
@@ -84,12 +85,18 @@ _DEEP = re.compile(
     re.IGNORECASE,
 )
 _FOLLOWUP = re.compile(
-    r"^(?:它|他们|它们|这些|上述|那(?:么|个)|再(?:详细|解释)|继续|为什么这样|what about|how about|and (?:what|how)|these|those|it\b)",
+    r"^(?:它|他们|它们|这些|上述|那(?:么|个)|再(?:详细|解释)|继续|针对|关于|就.{0,12}(?:展开|详细)|"
+    r"展开讲讲|详细讲讲|进一步|具体说|为什么这样|what about|how about|tell me more|"
+    r"elaborate on|and (?:what|how)|these|those|it\b)",
     re.IGNORECASE,
 )
 _ALIASES = [
     (r"主要服务|主要解决方案|提供哪些|哪些服务", "services solutions capabilities"),
     (r"Sitecore", "Sitecore development implementation services"),
+    (
+        r"AI.{0,8}(?:内容管理|CMS)|(?:内容管理|CMS).{0,8}AI",
+        "AI CMS content management integration Sitecore Stream",
+    ),
     (r"企业出海", "global expansion international overseas solutions"),
     (r"客户案例|案例|case studies", "customer case studies success stories"),
     (r"企业搜索|内容发现", "enterprise search content discovery"),
@@ -283,6 +290,10 @@ def indexed_case_chunks(
 def rank_sections(
     sections: list[InferenceSection], question: str
 ) -> list[InferenceSection]:
+    started = time.perf_counter()
+    rerank_elapsed_ms = 0
+    rerank_cache_status = "unused"
+    rerank_started: float | None = None
     # Dedicated multilingual reranking is not generative answer inference.
     # It never chooses a source outside the ACL-filtered candidate list.
     candidates = sorted(
@@ -345,7 +356,10 @@ def rank_sections(
         ranks: list[RankResult]
         if cached:
             ranks = cast(list[RankResult], json.loads(cached))
+            rerank_cache_status = "hit"
         else:
+            rerank_cache_status = "miss"
+            rerank_started = time.perf_counter()
             with traced_llm_call(
                 flow=LLMFlow.RERANK,
                 model="BAAI/bge-reranker-v2-m3",
@@ -362,6 +376,9 @@ def rank_sections(
                         "return_documents": False,
                     },
                     timeout=(2, 5),
+                )
+                rerank_elapsed_ms = round(
+                    (time.perf_counter() - rerank_started) * 1000
                 )
                 response.raise_for_status()
                 ranks = cast(list[RankResult], response.json()["results"])
@@ -381,6 +398,8 @@ def rank_sections(
         threshold = MIN_RELEVANCE
         method = "multilingual_reranker"
     except (requests.RequestException, ValueError, KeyError, StopIteration):
+        if rerank_started is not None:
+            rerank_elapsed_ms = round((time.perf_counter() - rerank_started) * 1000)
         # A provider outage cannot turn into an ungrounded model answer.
         stopwords = {
             "qedge",
@@ -456,11 +475,14 @@ def rank_sections(
         if len(result) >= 8:
             break
     logger.info(
-        "event=qedge_rag_rank method=%s candidates=%s selected=%s top_score=%.4f",
+        "event=qedge_rag_rank method=%s candidates=%s selected=%s top_score=%.4f elapsed_ms=%s rerank_elapsed_ms=%s rerank_cache=%s",
         method,
         len(candidates),
         len(result),
         scored[0][1] if scored else 0,
+        round((time.perf_counter() - started) * 1000),
+        rerank_elapsed_ms,
+        rerank_cache_status,
     )
     return result
 
@@ -613,7 +635,16 @@ def synthesize_knowledge_answer(
                 + (
                     "Give a grounded comparison or analysis, explaining limitations. "
                     if requires_synthesis(question, force_deep)
-                    else "Keep the answer concise: roughly 150-250 English words or 250-500 Chinese characters unless the question needs less. "
+                    else "Keep the answer concise: roughly 120-200 English words or 180-350 Chinese characters unless the question needs less. "
+                )
+                + (
+                    "For a broad question about QEdge's services or capabilities, start with the direct answer, then group supported offerings into at most three clear categories with concrete examples. Do not lead with a generic summary or include partner-history facts unless asked. "
+                    if re.search(
+                        r"提供哪些|哪些服务|主要服务|能帮我做什么|做什么业务|services|capabilities",
+                        current_question,
+                        re.IGNORECASE,
+                    )
+                    else "Start with a direct answer to the specific question. Avoid a generic opening. "
                 )
                 + (
                     "Respond in English. "
@@ -629,6 +660,7 @@ def synthesize_knowledge_answer(
                 + ("respond in English." if english else "仅使用简体中文回答。")
             )
             numbers: set[int] = set()
+            synthesis_started = time.perf_counter()
             try:
                 attempted = True
                 result = llm.invoke(
@@ -663,6 +695,14 @@ def synthesize_knowledge_answer(
                     ),
                 )
                 usage = result.usage
+                logger.info(
+                    "event=qedge_rag_synthesis elapsed_ms=%s model=%s mode=%s",
+                    round((time.perf_counter() - synthesis_started) * 1000),
+                    llm.config.model_name,
+                    "deep_summary"
+                    if requires_synthesis(question, force_deep)
+                    else "summary",
+                )
                 text = (result.text or "").strip()
                 text = re.sub(r"【(\d+)】", r"[\1]", text)
                 text = re.sub(r"\[\[(\d+)\]\]", r"[\1]", text)
@@ -696,6 +736,14 @@ def synthesize_knowledge_answer(
                     )
                     generated = True
             except Exception as exc:
+                logger.info(
+                    "event=qedge_rag_synthesis elapsed_ms=%s model=%s mode=%s outcome=error",
+                    round((time.perf_counter() - synthesis_started) * 1000),
+                    llm.config.model_name,
+                    "deep_summary"
+                    if requires_synthesis(question, force_deep)
+                    else "summary",
+                )
                 logger.warning(
                     "Knowledge synthesis unavailable: %s", llm.redact_error(str(exc))
                 )

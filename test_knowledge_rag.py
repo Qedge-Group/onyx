@@ -247,6 +247,22 @@ class KnowledgeTests(unittest.TestCase):
         q = resolve_question(h)
         self.assertIn("Sitecore", q)
         self.assertNotIn("火星", q)
+
+    def test_targeted_expansion_followup_keeps_previous_topic(self):
+        from onyx.chat.knowledge_rag import lexical_queries
+
+        h = [
+            message("Sitecore 是什么？"),
+            message("Sitecore 是内容管理平台。", MessageType.ASSISTANT),
+            message("针对 AI 与内容管理集成展开讲讲呢"),
+        ]
+        q = resolve_question(h)
+        self.assertIn("Sitecore 是什么？", q)
+        self.assertIn("AI 与内容管理集成", q)
+        self.assertIn(
+            "AI CMS content management integration Sitecore Stream",
+            lexical_queries(q),
+        )
         h[-1] = message("请深入比较这些实施方式")
         q = resolve_question(h)
         self.assertIn("Sitecore", q)
