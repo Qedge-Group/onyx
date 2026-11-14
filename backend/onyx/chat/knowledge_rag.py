@@ -8,6 +8,7 @@ import hashlib
 import json
 import os
 import re
+import time
 from collections.abc import Sequence
 from typing import Literal, TypedDict, cast
 from urllib.parse import urlsplit
@@ -78,18 +79,24 @@ def _load_min_relevance(raw: str) -> float:
 
 PERSONAS = _load_personas(os.environ.get("QEDGE_RAG_PERSONAS", ""))
 MIN_RELEVANCE = _load_min_relevance(os.environ.get("QEDGE_RAG_MIN_RELEVANCE", "0.20"))
-_COMPANY_NAME = re.compile(r"\s*qedge\s*[?？.!！。]*\s*", re.IGNORECASE)
+_ENTITY_ONLY = re.compile(r"\s*[\w][\w.-]{1,60}[?？.!！。]*\s*", re.IGNORECASE)
 _DEEP = re.compile(
     r"深入|深层|详细分析|分析.{0,12}(?:原因|差异|风险)|比较|对比|为什么|如何选择|制定.{0,8}方案|推导|evaluate|compare|trade.?off|why\b|in.depth|recommend.{0,12}strategy",
     re.IGNORECASE,
 )
 _FOLLOWUP = re.compile(
-    r"^(?:它|他们|它们|这些|上述|那(?:么|个)|再(?:详细|解释)|继续|为什么这样|what about|how about|and (?:what|how)|these|those|it\b)",
+    r"^(?:它|他们|它们|这些|上述|那(?:么|个)|再(?:详细|解释)|继续|针对|关于|就.{0,12}(?:展开|详细)|"
+    r"展开讲讲|详细讲讲|进一步|具体说|为什么这样|what about|how about|tell me more|"
+    r"elaborate on|and (?:what|how)|these|those|it\b)",
     re.IGNORECASE,
 )
 _ALIASES = [
     (r"主要服务|主要解决方案|提供哪些|哪些服务", "services solutions capabilities"),
     (r"Sitecore", "Sitecore development implementation services"),
+    (
+        r"AI.{0,8}(?:内容管理|CMS)|(?:内容管理|CMS).{0,8}AI",
+        "AI CMS content management integration Sitecore Stream",
+    ),
     (r"企业出海", "global expansion international overseas solutions"),
     (r"客户案例|案例|case studies", "customer case studies success stories"),
     (r"企业搜索|内容发现", "enterprise search content discovery"),
@@ -215,10 +222,10 @@ def focus_query(question: str) -> str:
 
 
 def lexical_queries(question: str) -> list[str]:
-    if _COMPANY_NAME.fullmatch(question):
+    if _ENTITY_ONLY.fullmatch(question):
         return [
-            "QEdge company services solutions",
-            "QEdge 公司 简介 服务 解决方案",
+            "organization company profile services solutions",
+            "公司 简介 服务 解决方案",
         ]
     if re.search(r"客户案例|case studies", question, re.IGNORECASE):
         return [
@@ -283,6 +290,10 @@ def indexed_case_chunks(
 def rank_sections(
     sections: list[InferenceSection], question: str
 ) -> list[InferenceSection]:
+    started = time.perf_counter()
+    rerank_elapsed_ms = 0
+    rerank_cache_status = "unused"
+    rerank_started: float | None = None
     # Dedicated multilingual reranking is not generative answer inference.
     # It never chooses a source outside the ACL-filtered candidate list.
     candidates = sorted(
@@ -345,7 +356,10 @@ def rank_sections(
         ranks: list[RankResult]
         if cached:
             ranks = cast(list[RankResult], json.loads(cached))
+            rerank_cache_status = "hit"
         else:
+            rerank_cache_status = "miss"
+            rerank_started = time.perf_counter()
             with traced_llm_call(
                 flow=LLMFlow.RERANK,
                 model="BAAI/bge-reranker-v2-m3",
@@ -363,6 +377,7 @@ def rank_sections(
                     },
                     timeout=(2, 5),
                 )
+                rerank_elapsed_ms = round((time.perf_counter() - rerank_started) * 1000)
                 response.raise_for_status()
                 ranks = cast(list[RankResult], response.json()["results"])
             try:
@@ -381,6 +396,8 @@ def rank_sections(
         threshold = MIN_RELEVANCE
         method = "multilingual_reranker"
     except (requests.RequestException, ValueError, KeyError, StopIteration):
+        if rerank_started is not None:
+            rerank_elapsed_ms = round((time.perf_counter() - rerank_started) * 1000)
         # A provider outage cannot turn into an ungrounded model answer.
         stopwords = {
             "qedge",
@@ -456,11 +473,14 @@ def rank_sections(
         if len(result) >= 8:
             break
     logger.info(
-        "event=qedge_rag_rank method=%s candidates=%s selected=%s top_score=%.4f",
+        "event=qedge_rag_rank method=%s candidates=%s selected=%s top_score=%.4f elapsed_ms=%s rerank_elapsed_ms=%s rerank_cache=%s",
         method,
         len(candidates),
         len(result),
         scored[0][1] if scored else 0,
+        round((time.perf_counter() - started) * 1000),
+        rerank_elapsed_ms,
+        rerank_cache_status,
     )
     return result
 
@@ -524,7 +544,7 @@ def answer_language(
 ) -> Literal["en", "zh"]:
     if re.search(r"[\u4e00-\u9fff]", question):
         return "zh"
-    if _COMPANY_NAME.fullmatch(question):
+    if _ENTITY_ONLY.fullmatch(question):
         return fallback or "zh"
     return "en" if re.search(r"[a-z]", question, re.IGNORECASE) else fallback or "zh"
 
@@ -551,11 +571,11 @@ def synthesize_knowledge_answer(
     english = answer_language(current_question, response_language) == "en"
     synthesis_question = (
         (
-            "Introduce QEdge and its main services."
+            f'Introduce "{question.strip()}" using the supplied indexed evidence.'
             if english
-            else "请介绍 QEdge 公司及其主要服务。"
+            else f"请根据已收录资料介绍“{question.strip()}”。"
         )
-        if _COMPANY_NAME.fullmatch(question)
+        if _ENTITY_ONLY.fullmatch(question)
         else question
     )
     rich = response.details
@@ -613,14 +633,19 @@ def synthesize_knowledge_answer(
                 + (
                     "Give a grounded comparison or analysis, explaining limitations. "
                     if requires_synthesis(question, force_deep)
-                    else "Keep the answer concise: roughly 150-250 English words or 250-500 Chinese characters unless the question needs less. "
+                    else "Keep straightforward answers brief. Add detail only when it helps answer the question; do not pad the response. "
                 )
                 + (
-                    "Respond in English. "
-                    if english
-                    else "使用简体中文，历史别名科睿哲统一改为 QEdge。 "
+                    "For a broad question about an organization's services or capabilities, answer directly and synthesize the main supported themes with useful examples. Choose paragraphs or a short list to fit the evidence; do not include partner-history facts unless asked. "
+                    if re.search(
+                        r"提供哪些|哪些服务|主要服务|能帮我做什么|做什么业务|services|capabilities",
+                        current_question,
+                        re.IGNORECASE,
+                    )
+                    else "Lead with the most useful supported point. Let the structure and detail follow the question and evidence; avoid a stock opening. "
                 )
-                + "When speaking for QEdge, use we/our or 我们, without inventing experience or claims. "
+                + ("Respond in English. " if english else "使用简体中文。 ")
+                + "Identify the organization, brand, and products from the supplied evidence. Preserve their documented names. Adapt tone, perspective, terminology, and answer structure to the indexed material and selected Agent guidance. Infer those preferences from the supplied evidence; paraphrase in fresh language instead of copying its sentences. Use first-person plural only when the evidence clearly speaks for the organization; otherwise use neutral phrasing. Do not assume a QEdge identity or fixed brand voice. "
                 + (persona.system_prompt or "")
                 + "\n"
                 + (persona.task_prompt or "")
@@ -629,6 +654,7 @@ def synthesize_knowledge_answer(
                 + ("respond in English." if english else "仅使用简体中文回答。")
             )
             numbers: set[int] = set()
+            synthesis_started = time.perf_counter()
             try:
                 attempted = True
                 result = llm.invoke(
@@ -663,6 +689,14 @@ def synthesize_knowledge_answer(
                     ),
                 )
                 usage = result.usage
+                logger.info(
+                    "event=qedge_rag_synthesis elapsed_ms=%s model=%s mode=%s",
+                    round((time.perf_counter() - synthesis_started) * 1000),
+                    llm.config.model_name,
+                    "deep_summary"
+                    if requires_synthesis(question, force_deep)
+                    else "summary",
+                )
                 text = (result.text or "").strip()
                 text = re.sub(r"【(\d+)】", r"[\1]", text)
                 text = re.sub(r"\[\[(\d+)\]\]", r"[\1]", text)
@@ -679,7 +713,6 @@ def synthesize_knowledge_answer(
                     and numbers.issubset({item["document"] for item in evidence})
                     and numbers.issubset(sources)
                 ):
-                    text = text.replace("科睿哲", "QEdge")
                     cited = (
                         {i: sources[i] for i in sorted(numbers)}
                         if include_citations
@@ -696,6 +729,14 @@ def synthesize_knowledge_answer(
                     )
                     generated = True
             except Exception as exc:
+                logger.info(
+                    "event=qedge_rag_synthesis elapsed_ms=%s model=%s mode=%s outcome=error",
+                    round((time.perf_counter() - synthesis_started) * 1000),
+                    llm.config.model_name,
+                    "deep_summary"
+                    if requires_synthesis(question, force_deep)
+                    else "summary",
+                )
                 logger.warning(
                     "Knowledge synthesis unavailable: %s", llm.redact_error(str(exc))
                 )

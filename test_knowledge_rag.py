@@ -97,7 +97,16 @@ class KnowledgeTests(unittest.TestCase):
             llm.invoke.call_args.args[0].system_prompt.endswith("仅使用简体中文回答。")
         )
         state, llm, tool, emitter = self.run_turn("qedge")
-        self.assertIn("请介绍 QEdge 公司", str(llm.invoke.call_args.args[0].messages))
+        self.assertIn(
+            "请根据已收录资料介绍", str(llm.invoke.call_args.args[0].messages)
+        )
+
+    def test_answer_voice_and_identity_are_not_fixed_to_qedge(self):
+        _, llm, _, _ = self.run_turn("Sitecore")
+        system = llm.invoke.call_args.args[0].system_prompt
+        self.assertIn("Adapt tone, perspective, terminology", system)
+        self.assertIn("Do not assume a QEdge identity", system)
+        self.assertNotIn("When speaking for QEdge", system)
 
     def setUp(self):
         self.cache_values = {}
@@ -247,6 +256,22 @@ class KnowledgeTests(unittest.TestCase):
         q = resolve_question(h)
         self.assertIn("Sitecore", q)
         self.assertNotIn("火星", q)
+
+    def test_targeted_expansion_followup_keeps_previous_topic(self):
+        from onyx.chat.knowledge_rag import lexical_queries
+
+        h = [
+            message("Sitecore 是什么？"),
+            message("Sitecore 是内容管理平台。", MessageType.ASSISTANT),
+            message("针对 AI 与内容管理集成展开讲讲呢"),
+        ]
+        q = resolve_question(h)
+        self.assertIn("Sitecore 是什么？", q)
+        self.assertIn("AI 与内容管理集成", q)
+        self.assertIn(
+            "AI CMS content management integration Sitecore Stream",
+            lexical_queries(q),
+        )
         h[-1] = message("请深入比较这些实施方式")
         q = resolve_question(h)
         self.assertIn("Sitecore", q)
