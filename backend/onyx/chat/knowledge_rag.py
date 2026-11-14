@@ -79,7 +79,7 @@ def _load_min_relevance(raw: str) -> float:
 
 PERSONAS = _load_personas(os.environ.get("QEDGE_RAG_PERSONAS", ""))
 MIN_RELEVANCE = _load_min_relevance(os.environ.get("QEDGE_RAG_MIN_RELEVANCE", "0.20"))
-_COMPANY_NAME = re.compile(r"\s*qedge\s*[?？.!！。]*\s*", re.IGNORECASE)
+_ENTITY_ONLY = re.compile(r"\s*[\w][\w.-]{1,60}[?？.!！。]*\s*", re.IGNORECASE)
 _DEEP = re.compile(
     r"深入|深层|详细分析|分析.{0,12}(?:原因|差异|风险)|比较|对比|为什么|如何选择|制定.{0,8}方案|推导|evaluate|compare|trade.?off|why\b|in.depth|recommend.{0,12}strategy",
     re.IGNORECASE,
@@ -222,10 +222,10 @@ def focus_query(question: str) -> str:
 
 
 def lexical_queries(question: str) -> list[str]:
-    if _COMPANY_NAME.fullmatch(question):
+    if _ENTITY_ONLY.fullmatch(question):
         return [
-            "QEdge company services solutions",
-            "QEdge 公司 简介 服务 解决方案",
+            "organization company profile services solutions",
+            "公司 简介 服务 解决方案",
         ]
     if re.search(r"客户案例|case studies", question, re.IGNORECASE):
         return [
@@ -377,9 +377,7 @@ def rank_sections(
                     },
                     timeout=(2, 5),
                 )
-                rerank_elapsed_ms = round(
-                    (time.perf_counter() - rerank_started) * 1000
-                )
+                rerank_elapsed_ms = round((time.perf_counter() - rerank_started) * 1000)
                 response.raise_for_status()
                 ranks = cast(list[RankResult], response.json()["results"])
             try:
@@ -546,7 +544,7 @@ def answer_language(
 ) -> Literal["en", "zh"]:
     if re.search(r"[\u4e00-\u9fff]", question):
         return "zh"
-    if _COMPANY_NAME.fullmatch(question):
+    if _ENTITY_ONLY.fullmatch(question):
         return fallback or "zh"
     return "en" if re.search(r"[a-z]", question, re.IGNORECASE) else fallback or "zh"
 
@@ -573,11 +571,11 @@ def synthesize_knowledge_answer(
     english = answer_language(current_question, response_language) == "en"
     synthesis_question = (
         (
-            "Introduce QEdge and its main services."
+            f'Introduce "{question.strip()}" using the supplied indexed evidence.'
             if english
-            else "请介绍 QEdge 公司及其主要服务。"
+            else f'请根据已收录资料介绍“{question.strip()}”。'
         )
-        if _COMPANY_NAME.fullmatch(question)
+        if _ENTITY_ONLY.fullmatch(question)
         else question
     )
     rich = response.details
@@ -635,23 +633,19 @@ def synthesize_knowledge_answer(
                 + (
                     "Give a grounded comparison or analysis, explaining limitations. "
                     if requires_synthesis(question, force_deep)
-                    else "Keep the answer concise: roughly 120-200 English words or 180-350 Chinese characters unless the question needs less. "
+                    else "Keep straightforward answers brief. Add detail only when it helps answer the question; do not pad the response. "
                 )
                 + (
-                    "For a broad question about QEdge's services or capabilities, start with the direct answer, then group supported offerings into at most three clear categories with concrete examples. Do not lead with a generic summary or include partner-history facts unless asked. "
+                    "For a broad question about an organization's services or capabilities, answer directly and synthesize the main supported themes with useful examples. Choose paragraphs or a short list to fit the evidence; do not include partner-history facts unless asked. "
                     if re.search(
                         r"提供哪些|哪些服务|主要服务|能帮我做什么|做什么业务|services|capabilities",
                         current_question,
                         re.IGNORECASE,
                     )
-                    else "Start with a direct answer to the specific question. Avoid a generic opening. "
+                    else "Lead with the most useful supported point. Let the structure and detail follow the question and evidence; avoid a stock opening. "
                 )
-                + (
-                    "Respond in English. "
-                    if english
-                    else "使用简体中文，历史别名科睿哲统一改为 QEdge。 "
-                )
-                + "When speaking for QEdge, use we/our or 我们, without inventing experience or claims. "
+                + ("Respond in English. " if english else "使用简体中文。 ")
+                + "Identify the organization, brand, and products from the supplied evidence. Preserve their documented names. Adapt tone, perspective, terminology, and answer structure to the indexed material and selected Agent guidance. Infer those preferences from the supplied evidence; paraphrase in fresh language instead of copying its sentences. Use first-person plural only when the evidence clearly speaks for the organization; otherwise use neutral phrasing. Do not assume a QEdge identity or fixed brand voice. "
                 + (persona.system_prompt or "")
                 + "\n"
                 + (persona.task_prompt or "")
@@ -719,7 +713,6 @@ def synthesize_knowledge_answer(
                     and numbers.issubset({item["document"] for item in evidence})
                     and numbers.issubset(sources)
                 ):
-                    text = text.replace("科睿哲", "QEdge")
                     cited = (
                         {i: sources[i] for i in sorted(numbers)}
                         if include_citations

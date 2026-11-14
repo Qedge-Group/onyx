@@ -97,7 +97,14 @@ class KnowledgeTests(unittest.TestCase):
             llm.invoke.call_args.args[0].system_prompt.endswith("仅使用简体中文回答。")
         )
         state, llm, tool, emitter = self.run_turn("qedge")
-        self.assertIn("请介绍 QEdge 公司", str(llm.invoke.call_args.args[0].messages))
+        self.assertIn("请根据已收录资料介绍", str(llm.invoke.call_args.args[0].messages))
+
+    def test_answer_voice_and_identity_are_not_fixed_to_qedge(self):
+        _, llm, _, _ = self.run_turn("Sitecore")
+        system = llm.invoke.call_args.args[0].system_prompt
+        self.assertIn("Adapt tone, perspective, terminology", system)
+        self.assertIn("Do not assume a QEdge identity", system)
+        self.assertNotIn("When speaking for QEdge", system)
 
     def setUp(self):
         self.cache_values = {}
