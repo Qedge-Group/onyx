@@ -573,7 +573,7 @@ def synthesize_knowledge_answer(
         (
             f'Introduce "{question.strip()}" using the supplied indexed evidence.'
             if english
-            else f'请根据已收录资料介绍“{question.strip()}”。'
+            else f"请根据已收录资料介绍“{question.strip()}”。"
         )
         if _ENTITY_ONLY.fullmatch(question)
         else question
