@@ -112,6 +112,18 @@ class KnowledgeTests(unittest.TestCase):
         self.assertEqual(request.options.max_tokens, 750)
         self.assertTrue(requires_synthesis("针对 AI 与内容管理集成展开讲讲呢"))
 
+    def test_open_source_case_query_retains_its_specific_requirement(self):
+        from onyx.chat.knowledge_rag import lexical_queries
+
+        self.assertIn(
+            "开源", lexical_queries("我想做开源方案，有相关案例吗 / 帮我找项目案例")
+        )
+        _, llm, _, _ = self.run_turn("有开源项目案例吗？")
+        self.assertIn(
+            "not proof of a qualifying implementation case",
+            llm.invoke.call_args.args[0].system_prompt,
+        )
+
     def test_answer_voice_and_identity_are_not_fixed_to_qedge(self):
         _, llm, _, _ = self.run_turn("Sitecore")
         system = llm.invoke.call_args.args[0].system_prompt
