@@ -2,7 +2,7 @@
 
 import { useState } from "react";
 import { useTranslations } from "next-intl";
-import { Button, Modal, Text } from "@opal/components";
+import { Button, MessageCard, Modal, Text } from "@opal/components";
 import { Content, Section } from "@opal/layouts";
 import { SvgBlocks, SvgLock, SvgOrganization, SvgUsers } from "@opal/icons";
 import { useUser } from "@/providers/UserProvider";
@@ -18,7 +18,6 @@ import type {
 import type { SkillShareUpdatePayload } from "@/lib/skills/api";
 import { AddPeoplePicker } from "@/sections/modals/AddPeoplePicker";
 import { SharePermissionMenu } from "@/lib/permissions/components";
-import { useSharePermissionOptions } from "@/sections/modals/shareAccessConstants";
 
 interface BulkSkillSharingModalProps {
   count: number;
@@ -44,18 +43,16 @@ export default function BulkSkillSharingModal({
   const { isAdmin } = useUser();
   const { data: users } = useShareableUsers({ includeApiKeys: true });
   const { data: groups } = useShareableGroups();
-  const [scope, setScope] = useState<"KEEP" | "PRIVATE" | "PUBLIC">("KEEP");
+  // Publishing is one-way, so bulk can publish but never make skills private.
+  const [scope, setScope] = useState<"KEEP" | "PUBLIC">("KEEP");
   const [policy, setPolicy] = useState<"KEEP" | SkillInstallationPolicy>(
     "KEEP"
   );
   const [permission, setPermission] = useState<SkillSharePermission>("VIEWER");
-  const [publicPermission, setPublicPermission] =
-    useState<SkillSharePermission>("VIEWER");
   const [stagedUsers, setStagedUsers] = useState<MinimalUserSnapshot[]>([]);
   const [stagedGroups, setStagedGroups] = useState<MinimalUserGroupSnapshot[]>(
     []
   );
-  const permissionOptions = useSharePermissionOptions();
   const changed =
     scope !== "KEEP" ||
     policy !== "KEEP" ||
@@ -68,15 +65,13 @@ export default function BulkSkillSharingModal({
     setScope("KEEP");
     setPolicy("KEEP");
     setPermission("VIEWER");
-    setPublicPermission("VIEWER");
     setStagedUsers([]);
     setStagedGroups([]);
   }
 
   async function save() {
     const sharing: SkillShareUpdatePayload = {};
-    if (scope !== "KEEP")
-      sharing.public_permission = scope === "PUBLIC" ? publicPermission : null;
+    if (scope === "PUBLIC") sharing.public_permission = "VIEWER";
     if (policy !== "KEEP") sharing.installation_policy = policy;
     if (stagedUsers.length)
       sharing.user_shares = stagedUsers.map((user) => ({
@@ -111,11 +106,7 @@ export default function BulkSkillSharingModal({
         <Modal.Body>
           <Section gap={4} height="auto" alignItems="stretch">
             <Section gap={2} height="auto" alignItems="stretch">
-              <Content
-                title={shareCopy("accessTitle")}
-                sizePreset="main-ui"
-                variant="section"
-              />
+              <Content font="main-ui-action" title={shareCopy("accessTitle")} />
               <SharePermissionMenu
                 value={scope}
                 onChange={setScope}
@@ -128,24 +119,23 @@ export default function BulkSkillSharingModal({
                     label: t("everyone"),
                     icon: SvgOrganization,
                   },
-                  { value: "PRIVATE", label: t("invitedOnly"), icon: SvgLock },
                 ]}
               />
               {scope === "PUBLIC" && (
-                <SharePermissionMenu
-                  value={publicPermission}
-                  onChange={setPublicPermission}
-                  options={permissionOptions}
-                  disabled={saving}
+                <MessageCard
+                  variant="warning"
+                  outerPadding={1}
+                  innerPadding={1}
+                  title={t("publishWarning.title")}
+                  description={t("publishWarning.description")}
                 />
               )}
             </Section>
             {isAdmin && (
               <Section gap={2} height="auto" alignItems="stretch">
                 <Content
+                  font="main-ui-action"
                   title={shareCopy("installation.title")}
-                  sizePreset="main-ui"
-                  variant="section"
                 />
                 <SharePermissionMenu
                   value={policy}
@@ -174,11 +164,7 @@ export default function BulkSkillSharingModal({
               </Section>
             )}
             <Section gap={2} height="auto" alignItems="stretch">
-              <Content
-                title={shareCopy("peopleTitle")}
-                sizePreset="main-ui"
-                variant="section"
-              />
+              <Content font="main-ui-action" title={shareCopy("peopleTitle")} />
               <Text font="secondary-body" color="text-03">
                 {t("addAccessDescription")}
               </Text>

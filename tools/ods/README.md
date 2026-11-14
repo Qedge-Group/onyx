@@ -348,9 +348,15 @@ forgets a service. `down` also stops the Compose containers; volumes are kept.
 | `default` | `minimal` plus the primary, light, beat, docfetching, docprocessing and user_file_processing Celery workers |
 | `full` | Every service in the `Run All Onyx Services` compound |
 
-The model server comes from Compose. `--local-model-server` runs it from the
-checkout instead, on its own leased port, and leaves the Compose inference
-server down. The Slack bot (`full` only) binds its metrics server to port 8000;
+The model server comes from Compose and runs the `edge` image, which is built
+from `main` and bundles the checkout's default embedding model. The release
+image (`latest`) can lack that model, and the model server then downloads it
+from Hugging Face on the first embed. `up` pulls the current `edge` image and
+applies it when it creates or recreates the Compose containers; a failed pull
+keeps the cached image. `start` and `restart` do not touch the containers.
+Set `ONYX_MODEL_SERVER_IMAGE` or `IMAGE_TAG` in your shell to run another
+image. `--local-model-server` runs it from the checkout instead, on its own
+leased port, and leaves the Compose inference server down. The Slack bot (`full` only) binds its metrics server to port 8000;
 the stack never leases 8000 and skips the bot when the port is taken.
 
 **Flags** (`up`, `start`, `restart`):
@@ -529,6 +535,7 @@ later arguments go to the suite's test runner.
 | `ods` | | `tools/ods` | `go test` |
 | `cli` | | `cli` | `go test` |
 | `terraform` | `tf` | `terraform-provider-onyx` | `go test` |
+| `microvm` | | `microvm` | `go test` |
 
 The Go suites run with `-race`, the same as `pr-golang-tests.yml`. A runner that
 takes packages rather than files, such as `go test`, runs the package that holds
@@ -573,8 +580,8 @@ number counts only its own tests. That is a number the package's owner can act
 on; a cross-package `-coverpkg` total would credit a package for statements its
 own tests never assert on.
 
-The suites are the same Go modules `ods test` knows: `ods`, `cli`, and
-`terraform`. A module directory such as `tools/ods` is accepted in place of a
+The suites are the same Go modules `ods test` knows: `ods`, `cli`,
+`terraform` and `microvm`. A module directory such as `tools/ods` is accepted in place of a
 suite name, which is what CI passes.
 
 **Flags:**
@@ -996,6 +1003,28 @@ ods audit --format=sarif,text > audit.sarif
 ods audit --all-lockfiles --web --python
 ```
 
+#### Audit software installed outside package managers
+
+Use `ods audit image IMAGE --sbom /path/in/image.cdx.json` for a required CycloneDX inventory.
+ODS scans the inventory with pinned Grype and combines its findings with the OSV image report.
+Docker must be available. Missing inventory, empty inventory, and scanner errors fail the audit.
+Use `--sbom-only` when a job checks only software from supplemental inventories.
+The same advisory exceptions, JSON/SARIF reports, and CVE alerts apply to both scanners.
+
+Deployment opts into update deadlines with `--update-policy s3://onyx-internal-tools/audit/updates.json`.
+PR audits and CVE collection scan vulnerabilities without reading update policy.
+Missing or invalid policy fails deployment audits.
+This state is separate from advisory exceptions. It records an emergency minimum and each release's first observation.
+Routine updates warn after 24 hours and block after 72 hours. Emergency minimums block immediately.
+Stale upstream observations warn without resetting recorded deadlines.
+Image scans leave freshness checks disabled unless `--update-policy` is supplied.
+`ods audit gate` includes freshness checks as part of its deployment checks.
+
+CVE Tracking owns policy observation and S3 writes. Its manual `minimum` input raises Chrome's emergency minimum.
+It saves this minimum before upstream discovery, preserving release timestamps even if discovery fails.
+It checks main and supported release branches. Update Sandbox Browser opens or updates pin PRs for stale branches.
+CI builds the audit binary from source. Installed ODS commands receive these features through the normal devtools release.
+
 #### Checking a release branch before a tag
 
 `ods audit gate` runs the deploy gate on the checked-out tree: the lockfiles,
@@ -1274,6 +1303,58 @@ ods trace --project admin
 
 # List traces without opening
 ods trace --list
+```
+
+### `deploy edge` - Deploy main or a Branch to Edge
+
+Build images from `origin/main` or a pushed branch, then deploy them to the
+edge environment.
+
+```shell
+ods deploy edge [flags]
+```
+
+Without `--ref`, or with `--ref main`, the command force-pushes the `edge` tag
+to `origin/main`. With `--ref <branch or commit>`, it pushes the tag
+`dev-build-<branch>-<short-sha>` on that commit. The tag starts
+`deployment.yml`, which publishes the images to Docker Hub. When the build
+succeeds, the command dispatches the configured deploy workflow with
+`version_tag=<tag>`.
+
+A `dev-build-` tag never moves. If the tag already points at the commit, the
+command waits for its build and does not push again. If the tag points at
+another commit, the command stops.
+
+On first run, the command asks for the deploy target repo and the workflow
+filename, and saves them in the ods config file.
+
+| Flag                | Default | Description                                                         |
+| ------------------- | ------- | ------------------------------------------------------------------- |
+| `--ref`             | `main`  | Branch name or full commit SHA on origin to build                   |
+| `--tag`             |         | Tag for `--ref` instead of the derived tag; must start `dev-build-`, and must not contain `cloud` or end in `-dev` |
+| `--dry-run`         | `false` | Resolve the ref and tag only; push and dispatch nothing             |
+| `--yes`             | `false` | Skip the confirmation prompt                                        |
+| `--no-wait-deploy`  | `false` | Do not wait for the deploy workflow to finish                       |
+| `--verify`          | `false` | Run pre-push hooks when you push the tag                            |
+| `--target-repo`     |         | Deploy workflow repo (owner/name); overrides saved config           |
+| `--target-workflow` |         | Deploy workflow filename; overrides saved config                    |
+
+> [!IMPORTANT]
+> For a branch deploy, the onyx repo's `release` environment must admit tags
+> that match `dev-build-*` (Settings > Environments > release > Deployment
+> branches and tags). Without this rule, GitHub rejects the build jobs. The
+> images are public on Docker Hub. The scheduled nightly deploy replaces a
+> branch deployment.
+
+```shell
+# Build and deploy origin/main
+ods deploy edge
+
+# Build and deploy a pushed branch
+ods deploy edge --ref user/my-feature
+
+# Show the tag, push nothing
+ods deploy edge --ref user/my-feature --dry-run
 ```
 
 ### Testing Changes Locally (Dry Run)

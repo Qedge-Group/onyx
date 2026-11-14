@@ -1,0 +1,442 @@
+import type { BackendChatSession, Message } from "@/app/app/types";
+import { resumeStream } from "@/app/app/services/lib";
+import {
+  getLatestMessageChain,
+  getMessageByMessageId,
+} from "@/app/app/services/messageTree";
+import { mergeLatestChatPage } from "@/lib/chat/pagedSession";
+import type { ChatHistoryPage } from "@/lib/chat/types";
+import type { Packet } from "@/app/app/services/streamingModels";
+import { useChatSessionStore } from "@/app/app/stores/useChatSessionStore";
+import {
+  fetchSettledChatSession,
+  waitForChatResponseEnd,
+} from "@/lib/chat/sessionReadiness";
+
+interface SettleChatSessionOptions {
+  sessionId: string;
+  controller: AbortController;
+  errorMessage: string;
+  mode?: "completion" | "recovery";
+  refreshHistory?: boolean;
+}
+
+export function preserveFailedMessages(
+  saved: Map<number, Message>,
+  local: Map<number, Message>
+): Map<number, Message> {
+  const latest = getLatestMessageChain(local).at(-1);
+  for (const node of local.values()) {
+    if (node.type !== "error") continue;
+    const savedNode =
+      node.messageId === undefined ? undefined : saved.get(node.messageId);
+    if (!savedNode) {
+      // Keep the current rejected turn for retry; older rejected attempts are local only.
+      if (node.nodeId === latest?.nodeId) return local;
+      continue;
+    }
+    // A reserved row can contain fallback text without a saved execution outcome.
+    const hasSavedAnswer =
+      savedNode.type === "assistant" &&
+      (savedNode.responseStatus === undefined
+        ? Boolean(savedNode.message || savedNode.files.length > 0)
+        : savedNode.responseStatus === "complete" ||
+          savedNode.responseStatus === "limit" ||
+          savedNode.responseStatus === "cancelled");
+    if (savedNode.type === "error" || hasSavedAnswer) {
+      continue;
+    }
+    saved.set(savedNode.nodeId, {
+      ...savedNode,
+      type: "error",
+      message: node.message,
+      errorMessage: node.errorMessage,
+      errorCode: node.errorCode,
+      stackTrace: node.stackTrace,
+      isRetryable: node.isRetryable,
+      errorDetails: node.errorDetails,
+      packets: node.packets,
+      packetCount: node.packetCount,
+    });
+  }
+  return saved;
+}
+
+/**
+ * Saved history ready to display, with the live response a reader should replay.
+ * A retained replay cursor keeps output this browser already received.
+ */
+export function prepareSavedChat(
+  saved: Map<number, Message>,
+  local: Map<number, Message> | undefined,
+  streamId: number | undefined
+) {
+  const response =
+    streamId === undefined ? undefined : getMessageByMessageId(saved, streamId);
+  if (streamId === undefined || response?.type !== "assistant")
+    return { messageTree: saved, replayStreamId: null };
+  const retained = local && getMessageByMessageId(local, streamId);
+  const messageTree = new Map(saved);
+  messageTree.set(
+    response.nodeId,
+    retained?.replayCursor !== undefined
+      ? {
+          ...retained,
+          nodeId: response.nodeId,
+          parentNodeId: response.parentNodeId,
+          childrenNodeIds: response.childrenNodeIds,
+          latestChildNodeId: response.latestChildNodeId,
+        }
+      : { ...response, message: "", packets: [], packetCount: 0 }
+  );
+  return { messageTree, replayStreamId: streamId };
+}
+
+/**
+ * Merge the latest saved page into local history. Local failed turns stay for
+ * retry, and the sources panel stays on the selected response.
+ */
+function mergeSavedHistory(
+  saved: BackendChatSession,
+  current: ChatHistoryPage & { selectedNodeIdForDocDisplay: number | null }
+): ChatHistoryPage & { selectedNodeIdForDocDisplay: number | null } {
+  const page = mergeLatestChatPage(saved, current);
+  const messageTree = preserveFailedMessages(
+    page.messageTree,
+    current.messageTree
+  );
+  const selected = current.selectedNodeIdForDocDisplay;
+  if (messageTree === current.messageTree)
+    return {
+      messageTree,
+      hasOlderMessages: current.hasOlderMessages,
+      selectedNodeIdForDocDisplay: selected,
+    };
+  const selectedMessageId =
+    selected === null
+      ? undefined
+      : current.messageTree.get(selected)?.messageId;
+  return {
+    messageTree,
+    hasOlderMessages: page.hasOlderMessages,
+    selectedNodeIdForDocDisplay:
+      selectedMessageId === undefined
+        ? null
+        : (messageTree.get(selectedMessageId)?.nodeId ?? null),
+  };
+}
+
+// One refresh per session, so overlapping status checks share it.
+const refreshingSessions = new Map<string, Promise<void>>();
+
+/** Load and follow a turn the server started while this session had no reader. */
+export function refreshChatSession(
+  sessionId: string,
+  errorMessage: string,
+  savedSession?: BackendChatSession
+): Promise<void> {
+  const existing = refreshingSessions.get(sessionId);
+  if (existing) return existing;
+  const refresh = (async () => {
+    const session = useChatSessionStore.getState().sessions.get(sessionId);
+    if (!session || session.incognito) return;
+    const controller = session.abortController;
+    // A send that starts during the fetch owns the session.
+    const ownsRefresh = () =>
+      useChatSessionStore.getState().sessions.get(sessionId)
+        ?.abortController === controller;
+    try {
+      const saved = savedSession ?? (await fetchSettledChatSession(sessionId));
+      const store = useChatSessionStore.getState();
+      const current = store.sessions.get(sessionId);
+      if (!current || !ownsRefresh()) return;
+      const merged = mergeSavedHistory(saved, current);
+      const streamId = saved.current_stream?.stream_id;
+      const { messageTree, replayStreamId } = prepareSavedChat(
+        merged.messageTree,
+        current.messageTree,
+        streamId
+      );
+      const busy = Boolean(saved.is_processing || saved.current_stream);
+      store.updateSessionData(sessionId, {
+        messageTree,
+        hasOlderMessages: merged.hasOlderMessages,
+        selectedNodeIdForDocDisplay: merged.selectedNodeIdForDocDisplay,
+        chatState: busy ? "streaming" : "input",
+        sendAcknowledged:
+          streamId === undefined ? undefined : Promise.resolve(streamId),
+        readerFinished: undefined,
+        regenerationState: null,
+        streamingStartTime: busy ? Date.now() : undefined,
+        uncaughtError:
+          current.uncaughtError === errorMessage ? null : current.uncaughtError,
+      });
+      if (busy)
+        void followChatSession({
+          sessionId,
+          controller,
+          errorMessage,
+          streamId: replayStreamId,
+          messageMap: messageTree,
+        });
+    } catch (error) {
+      if (!ownsRefresh()) return;
+      console.error("Could not refresh the chat session", { sessionId, error });
+      useChatSessionStore.getState().updateSessionData(sessionId, {
+        chatState: "unconfirmed",
+        uncaughtError: errorMessage,
+      });
+    }
+  })().finally(() => refreshingSessions.delete(sessionId));
+  refreshingSessions.set(sessionId, refresh);
+  return refresh;
+}
+
+/** Release input only after the same request has finished execution and storage. */
+export async function settleChatSession({
+  sessionId,
+  controller,
+  errorMessage,
+  mode = "completion",
+  refreshHistory = true,
+}: SettleChatSessionOptions): Promise<void> {
+  const session = useChatSessionStore.getState().sessions.get(sessionId);
+  const sendAcknowledged = session?.sendAcknowledged;
+  const readerFinished = session?.readerFinished;
+  const ownsSettlement = () => {
+    const current = useChatSessionStore.getState().sessions.get(sessionId);
+    return (
+      current?.abortController === controller &&
+      current.readerFinished === readerFinished &&
+      current.chatState !== "input"
+    );
+  };
+  if (!ownsSettlement()) return;
+  try {
+    let streamId: number | null | undefined;
+    if (sendAcknowledged) {
+      try {
+        streamId = await sendAcknowledged;
+      } catch (error) {
+        // Explicit recovery checks server state after the original send failed.
+        if (mode !== "recovery") throw error;
+      }
+      if (!ownsSettlement()) return;
+    }
+    if (readerFinished) {
+      await readerFinished;
+      if (!ownsSettlement()) return;
+    }
+    let nextStreamId = await waitForChatResponseEnd(sessionId, streamId);
+    if (!ownsSettlement()) return;
+    // Incognito keeps output locally, so follow execution without replaying history.
+    while (nextStreamId != null && session?.incognito) {
+      nextStreamId = await waitForChatResponseEnd(sessionId, nextStreamId);
+      if (!ownsSettlement()) return;
+    }
+    if (nextStreamId != null) {
+      await refreshChatSession(sessionId, errorMessage);
+      return;
+    }
+    if (refreshHistory || mode === "recovery") {
+      const settled = session?.incognito
+        ? undefined
+        : await fetchSettledChatSession(sessionId);
+      if (!ownsSettlement()) return;
+      if (settled?.is_processing || settled?.current_stream) {
+        await refreshChatSession(sessionId, errorMessage, settled);
+        return;
+      }
+      const store = useChatSessionStore.getState();
+      const current = store.sessions.get(sessionId);
+      if (!current) return;
+      // Incognito history can contain only usage metadata. Live content stays local.
+      if (settled && !settled.incognito) {
+        const merged = mergeSavedHistory(settled, current);
+        const latestType = getLatestMessageChain(merged.messageTree).at(
+          -1
+        )?.type;
+        store.updateSessionData(sessionId, {
+          ...merged,
+          uncaughtError:
+            latestType === "assistant" || latestType === "error"
+              ? null
+              : current.uncaughtError,
+        });
+      } else {
+        // Content-free history cannot close a lost stream. Confirmed idle can.
+        const latest = getLatestMessageChain(current.messageTree).at(-1);
+        if (
+          (latest?.type === "assistant" ||
+            (latest?.type === "error" && latest.packets.length > 0)) &&
+          !latest.packets.some((packet) => packet.obj.type === "stop")
+        ) {
+          const packets: Message["packets"] = [
+            ...latest.packets,
+            {
+              placement: { turn_index: 0, tab_index: 0 },
+              obj: { type: "stop" },
+            },
+          ];
+          const messageTree = new Map(current.messageTree);
+          messageTree.set(latest.nodeId, {
+            ...latest,
+            packets,
+            packetCount: packets.length,
+          });
+          store.updateSessionMessageTree(sessionId, messageTree);
+        }
+      }
+    }
+    const store = useChatSessionStore.getState();
+    if (store.sessions.get(sessionId)?.uncaughtError === errorMessage) {
+      store.setUncaughtError(sessionId, null);
+    }
+    store.updateSessionData(sessionId, {
+      chatState: "input",
+      regenerationState: null,
+      streamingStartTime: undefined,
+      sendAcknowledged: undefined,
+      readerFinished: undefined,
+    });
+  } catch (error) {
+    if (!ownsSettlement()) return;
+    console.error("Could not confirm chat completion", error);
+    const store = useChatSessionStore.getState();
+    store.updateChatState(sessionId, "unconfirmed");
+    store.setUncaughtError(sessionId, errorMessage);
+  }
+}
+
+// A stream has one replay reader even if navigation and refresh overlap.
+const resumingStreams = new Set<number>();
+
+interface FollowChatSessionOptions {
+  sessionId: string;
+  controller: AbortController;
+  errorMessage: string;
+  mode?: "completion" | "recovery";
+  /** The saved live response to replay; null waits for the server without output. */
+  streamId: number | null;
+  messageMap: Map<number, Message>;
+}
+
+/** Attach to a turn that runs without this browser's original send request. */
+export async function followChatSession({
+  sessionId,
+  streamId,
+  messageMap,
+  controller,
+  errorMessage,
+  mode = "completion",
+}: FollowChatSessionOptions): Promise<void> {
+  if (streamId === null) {
+    await settleChatSession({ sessionId, controller, errorMessage, mode });
+    return;
+  }
+  const retained = getMessageByMessageId(messageMap, streamId);
+  if (!retained || resumingStreams.has(streamId)) {
+    return;
+  }
+  const node = { ...retained };
+  // Added and deleted in this function only, so an entry can never
+  // outlive its tail.
+  resumingStreams.add(streamId);
+  let resolveReaderFinished: () => void = () => {};
+  const readerFinished = new Promise<void>((resolve) => {
+    resolveReaderFinished = resolve;
+  });
+  useChatSessionStore.getState().updateSessionData(sessionId, {
+    readerFinished,
+    sendAcknowledged: Promise.resolve(streamId),
+  });
+  const accumulated: Packet[] = [...node.packets];
+  let restoring = true;
+  let pendingRestore: Message | undefined;
+  // Keep replay attached across navigation without changing the selected chat.
+  const ownsStream = () => {
+    const session = useChatSessionStore.getState().sessions.get(sessionId);
+    return (
+      session !== undefined &&
+      session.abortController === controller &&
+      session.chatState !== "input"
+    );
+  };
+  const publishResponse = (response: Message) => {
+    if (!ownsStream()) return;
+    messageMap.set(response.nodeId, response);
+    useChatSessionStore
+      .getState()
+      .updateSessionMessageTree(sessionId, new Map(messageMap));
+  };
+  const abortController = new AbortController();
+  try {
+    for await (const rawPacket of resumeStream(
+      sessionId,
+      streamId,
+      node.replayCursor ?? 0,
+      abortController.signal
+    )) {
+      if (!ownsStream()) {
+        return;
+      }
+      if ("next_cursor" in rawPacket) {
+        if (rawPacket.stream_id !== streamId) {
+          throw new Error("Replay cursor belongs to another response");
+        }
+        if (restoring) {
+          node.restoredPacketCount = accumulated.length;
+          restoring = !rawPacket.replay_complete;
+        }
+        // Store content and cursor together, only after a complete batch.
+        node.replayCursor = rawPacket.next_cursor;
+        const response: Message = {
+          ...node,
+          packets: [...accumulated],
+          packetCount: accumulated.length,
+        };
+        if (restoring) {
+          pendingRestore = response;
+          continue;
+        }
+        pendingRestore = undefined;
+        publishResponse(response);
+        continue;
+      }
+      if ("error" in rawPacket && rawPacket.error) {
+        // Keep the error on its reserved row through readiness retries.
+        node.type = "error";
+        node.errorMessage = rawPacket.error;
+        if (!("message_id" in rawPacket)) {
+          node.errorCode = rawPacket.error_code;
+          node.stackTrace = rawPacket.stack_trace;
+          node.isRetryable = rawPacket.is_retryable ?? true;
+          node.errorDetails = rawPacket.details;
+        }
+        node.is_generating = false;
+      }
+      if (!("obj" in rawPacket)) {
+        continue;
+      }
+      const packet = rawPacket;
+      // Heartbeats are liveness ticks for the ownership check above,
+      // not run state — never render them.
+      if (packet.obj.type === "chat_heartbeat") {
+        continue;
+      }
+      accumulated.push(packet);
+    }
+  } catch (error) {
+    console.error("Failed to resume in-flight run", { streamId, error });
+  } finally {
+    abortController.abort();
+    try {
+      // A lost tail must not discard earlier acknowledged cache batches.
+      if (pendingRestore) publishResponse(pendingRestore);
+    } finally {
+      resumingStreams.delete(streamId);
+      resolveReaderFinished();
+      void settleChatSession({ sessionId, controller, errorMessage, mode });
+    }
+  }
+}

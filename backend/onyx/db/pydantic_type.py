@@ -1,21 +1,30 @@
 import json
+from types import UnionType
 from typing import Any, Optional, Type
 
-from pydantic import BaseModel
+from pydantic import BaseModel, TypeAdapter
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.types import TypeDecorator
+
+from onyx.utils.postgres_sanitization import sanitize_json_like
 
 
 class PydanticType(TypeDecorator):
     impl = JSONB
-    # The only state is the model class, so statements stay cacheable.
+    # The model class and serialization options are stable for each column.
     cache_ok = True
 
     def __init__(
-        self, pydantic_model: Type[BaseModel], *args: Any, **kwargs: Any
+        self,
+        pydantic_model: Type[BaseModel] | UnionType,
+        sanitize_strings: bool = False,
+        *args: Any,
+        **kwargs: Any,
     ) -> None:
         super().__init__(*args, **kwargs)
         self.pydantic_model = pydantic_model
+        self._adapter = TypeAdapter[BaseModel](pydantic_model)
+        self.sanitize_strings = sanitize_strings
 
     def process_bind_param(
         self,
@@ -23,6 +32,8 @@ class PydanticType(TypeDecorator):
         dialect: Any,  # noqa: ARG002
     ) -> Optional[dict]:
         if value is not None:
+            if self.sanitize_strings:
+                return sanitize_json_like(value.model_dump(mode="json"))
             return json.loads(value.model_dump_json())
         return None
 
@@ -32,7 +43,7 @@ class PydanticType(TypeDecorator):
         dialect: Any,  # noqa: ARG002
     ) -> Optional[BaseModel]:
         if value is not None:
-            return self.pydantic_model.model_validate(value)
+            return self._adapter.validate_python(value)
         return None
 
 

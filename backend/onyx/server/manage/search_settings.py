@@ -106,6 +106,8 @@ from onyx.server.manage.models import (
     FullModelVersionResponse,
     ReindexProgress,
     UnstructuredApiKeyRequest,
+    VectorQuantizationLevelSupport,
+    VectorQuantizationSupport,
 )
 from onyx.server.models import IdReturn
 from onyx.server.runtime.onyx_runtime import OnyxRuntime
@@ -193,7 +195,8 @@ def set_new_search_settings(
         # Before the PRESENT row lock below: the probe is a network call. Nothing
         # is written yet, so end the read transaction instead of idling in it.
         if (
-            search_settings_new.provider_type == EmbeddingProvider.BIFROST
+            search_settings_new.provider_type
+            in (EmbeddingProvider.BIFROST, EmbeddingProvider.OPENAI_COMPATIBLE)
             or selectable_spec is not None
         ):
             db_session.commit()
@@ -393,8 +396,8 @@ def _validate_cloud_embedding_model(
 
 
 # Providers whose model list Onyx owns. Only SELECTABLE registry models are valid
-# new targets for them. LiteLLM, Azure and Bifrost take free-form names, so they
-# stay open.
+# new targets for them. LiteLLM, Azure, Bifrost and OpenAI-compatible take
+# free-form names, so they stay open.
 _REGISTRY_ONLY_CLOUD_PROVIDERS = frozenset(
     {
         EmbeddingProvider.OPENAI,
@@ -539,6 +542,31 @@ def _check_embedding_model_target(
         raise _not_selectable_error(request, spec)
 
 
+def _format_version(version: tuple[int, int]) -> str:
+    return f"{version[0]}.{version[1]}"
+
+
+def _min_opensearch_version(
+    vector_quantization: VectorQuantization,
+) -> tuple[int, int] | None:
+    """The oldest OpenSearch that can index this level, or None if any can."""
+    lucene_scalar_quantization = LUCENE_SCALAR_QUANTIZATION.get(vector_quantization)
+    if lucene_scalar_quantization is None:
+        return None
+    return lucene_scalar_quantization.min_opensearch_version
+
+
+def _is_supported(
+    vector_quantization: VectorQuantization,
+    cluster_version: tuple[int, int] | None,
+) -> bool:
+    """A cluster that does not report its version is not restricted."""
+    min_version: tuple[int, int] | None = _min_opensearch_version(vector_quantization)
+    return (
+        min_version is None or cluster_version is None or cluster_version >= min_version
+    )
+
+
 def _validate_vector_quantization_supported(
     vector_quantization: VectorQuantization,
 ) -> None:
@@ -548,13 +576,14 @@ def _validate_vector_quantization_supported(
     error instead of a failed index creation. A cluster that does not report
     its OpenSearch version is not checked.
     """
-    lucene_scalar_quantization = LUCENE_SCALAR_QUANTIZATION.get(vector_quantization)
-    if lucene_scalar_quantization is None or DISABLE_VECTOR_DB:
+    min_version: tuple[int, int] | None = _min_opensearch_version(vector_quantization)
+    if min_version is None or DISABLE_VECTOR_DB:
         return
     with OpenSearchClient() as opensearch_client:
         cluster_version = opensearch_client.get_opensearch_version()
-    min_version = lucene_scalar_quantization.min_opensearch_version
-    if cluster_version is not None and cluster_version < min_version:
+    if cluster_version is not None and not _is_supported(
+        vector_quantization, cluster_version
+    ):
         raise OnyxError(
             OnyxErrorCode.INVALID_INPUT,
             f"The {vector_quantization.value} vector quantization needs OpenSearch "
@@ -777,6 +806,38 @@ def delete_search_settings_endpoint(
         )
     except ValueError as e:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+
+
+@router.get("/vector-quantization-support", dependencies=[Depends(require_vector_db)])
+def get_vector_quantization_support(
+    _: User = Depends(require_permission(Permission.FULL_ADMIN_PANEL_ACCESS)),
+) -> VectorQuantizationSupport:
+    """Which vector quantization levels the OpenSearch cluster can index, so the
+    admin UI can disable a level before a reindex request is rejected."""
+    with OpenSearchClient() as opensearch_client:
+        cluster_version: tuple[int, int] | None = (
+            opensearch_client.get_opensearch_version()
+        )
+    levels: list[VectorQuantizationLevelSupport] = []
+    for vector_quantization in VectorQuantization:
+        min_version: tuple[int, int] | None = _min_opensearch_version(
+            vector_quantization
+        )
+        levels.append(
+            VectorQuantizationLevelSupport(
+                vector_quantization=vector_quantization,
+                supported=_is_supported(vector_quantization, cluster_version),
+                min_opensearch_version=(
+                    _format_version(min_version) if min_version else None
+                ),
+            )
+        )
+    return VectorQuantizationSupport(
+        opensearch_version=(
+            _format_version(cluster_version) if cluster_version else None
+        ),
+        levels=levels,
+    )
 
 
 @router.get("/get-current-search-settings")

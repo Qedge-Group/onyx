@@ -12,11 +12,16 @@ jest.mock("@/providers/UserProvider", () => ({
 }));
 jest.mock("@/hooks/useShareableUsers", () => ({
   __esModule: true,
-  default: () => ({ data: [] }),
+  default: () => ({
+    data: [
+      { id: "user-1", email: "subash@onyx.app" },
+      { id: "user-2", email: "thomas@onyx.app" },
+    ],
+  }),
 }));
 jest.mock("@/hooks/useShareableGroups", () => ({
   __esModule: true,
-  default: () => ({ data: [] }),
+  default: () => ({ data: [{ id: 7, name: "Cash Kings" }] }),
 }));
 
 describe("BulkSkillSharingModal", () => {
@@ -37,9 +42,16 @@ describe("BulkSkillSharingModal", () => {
       screen.getByRole("button", { name: "Apply to 80 skills" })
     ).toBeDisabled();
     await user.click(screen.getByRole("button", { name: "Who can access" }));
+    // Publishing is one-way: bulk cannot make skills private.
+    expect(
+      screen.queryByRole("option", { name: "Invited people and groups" })
+    ).not.toBeInTheDocument();
     fireEvent.click(
       screen.getByRole("option", { name: "Everyone in the organization" })
     );
+    expect(
+      await screen.findByText("Publishing cannot be undone")
+    ).toBeInTheDocument();
     await user.click(
       screen.getByRole("button", { name: "Apply to 80 skills" })
     );
@@ -77,5 +89,39 @@ describe("BulkSkillSharingModal", () => {
     expect(
       screen.getByRole("button", { name: "Apply to 2 skills" })
     ).toBeDisabled();
+  });
+  it("adds people picked from the suggestion list to every selected skill", async () => {
+    const user = setupUser();
+    const onSave = jest.fn().mockResolvedValue(undefined);
+    render(
+      <BulkSkillSharingModal
+        count={2}
+        canChangeOrgAccess
+        open
+        saving={false}
+        onClose={jest.fn()}
+        onSave={onSave}
+      />
+    );
+    const search = screen.getByRole("combobox", {
+      name: "Add users, groups, and accounts",
+    });
+    await user.type(search, "sub");
+    expect(
+      screen.queryByRole("option", { name: /thomas@onyx\.app/ })
+    ).not.toBeInTheDocument();
+    fireEvent.click(
+      await screen.findByRole("option", { name: /subash@onyx\.app/ })
+    );
+    expect(search).toHaveValue("");
+    await user.type(search, "cash");
+    fireEvent.click(await screen.findByRole("option", { name: /Cash Kings/ }));
+    await user.click(screen.getByRole("button", { name: "Apply to 2 skills" }));
+    await waitFor(() =>
+      expect(onSave).toHaveBeenCalledWith({
+        user_shares: [{ user_id: "user-1", permission: "VIEWER" }],
+        group_shares: [{ group_id: 7, permission: "VIEWER" }],
+      })
+    );
   });
 });

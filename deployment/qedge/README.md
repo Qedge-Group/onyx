@@ -7,9 +7,23 @@ The original patch and `source-provenance.json` describe that immutable snapshot
 Later fixes have separate source manifests and Git commits.
 See [the brand-query and language fix](brand-query-language-fix.md) for the current release.
 
-## Build
+## Build this upstream upgrade
 
-Run from the repository root:
+This branch uses the shared agent runtime. Build the complete backend image;
+do not copy these modules onto the v5.1.2 image.
+
+```sh
+docker build --target runtime -f backend/Dockerfile -t onyx-backend:qedge-upstream-runtime backend
+```
+
+Build the matching frontend and apply the upstream migrations before deployment.
+See [the runtime migration record](upstream-runtime-upgrade.md).
+
+## Build the archived v5.1.2 snapshot
+
+Use the archived `beta/rag-stable-v5.1.2-20261113` branch for the original snapshot.
+The later brand-query fix is recorded by its own commit and source manifest.
+Run the following from the matching historical checkout:
 
 ```sh
 docker build -f deployment/qedge/Dockerfile.rag-stable -t onyx-backend:v5.1.2-brand-language-20261113 .
