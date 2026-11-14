@@ -34,7 +34,7 @@ https://cloud.onyx.app/api/versions
 This endpoint returns the current latest stable and beta versions available on Docker Hub.
 
 <Tip>
-  If you don't specify a version when deploying Onyx, you will get the latest nightly builds.
+  If you do not set a version, Onyx uses the `latest` tag. It points to the latest stable release.
 </Tip>
 
 ## Versioning Scheme
@@ -64,9 +64,10 @@ major.minor.hotfix-beta.betahotfix
   - **Hotfix version** - Incremented only when backporting bugfixes to releases
 </Note>
 
-### Docker Files and Helm Charts
+### Docker Images and Helm Charts
 
-Changes to Docker files and Helm charts increment the version numbers in their respective files.
+Docker images are tagged with the Onyx version of the release. The Helm chart has its own version,
+`version` in `Chart.yaml`. Each change to the chart increments it.
 
 ## Release Schedule
 
@@ -135,9 +136,14 @@ These are tagged with a version number like `v5.0.0`.
 
     <AccordionGroup>
       <Accordion title="Docker Pull Images">
-        Specify the version tag in the environment.
+        Check out the Compose files of the same version, then specify the version tag in the environment.
+        New images need the services that their own Compose files define.
+        See [Upgrading](/deployment/local/docker#upgrading) to keep local edits to the Compose files.
 
         ```bash
+        git fetch origin tag v<MAJOR>.<MINOR>.<HOTFIX>
+        git switch --detach v<MAJOR>.<MINOR>.<HOTFIX>
+
         IMAGE_TAG=v<MAJOR>.<MINOR>.<HOTFIX> docker compose -f docker-compose.prod.yml up -d --pull always --force-recreate
         ```
       </Accordion>
@@ -176,3 +182,19 @@ These are tagged with a version number like `v5.0.0`.
     </Accordion>
   </Step>
 </Steps>
+
+### First upgrade to the shared agent runtime
+
+The shared agent runtime changes how servers track active chat responses.
+Old and new servers cannot coordinate concurrent writes to the same conversation.
+
+Before starting servers with the shared runtime:
+
+1. Stop new chat submissions to the old servers, including Slack and API clients.
+2. Let active responses finish, including model requests, tools, and storage writes.
+3. Stop the old processes. Start the updated servers, then restore chat access.
+
+Closing browser connections does not stop active responses. A disconnected response can continue running on its server.
+
+Update the backend before updating clients that check chat readiness.
+Those clients keep input blocked until the backend confirms completion.

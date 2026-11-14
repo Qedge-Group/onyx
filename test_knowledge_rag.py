@@ -2,24 +2,23 @@ import unittest
 from types import SimpleNamespace as NS
 from unittest.mock import MagicMock, patch
 
-from onyx.chat.chat_state import ChatStateContainer
-from onyx.chat.emitter import NullEmitter
 from onyx.chat.knowledge_rag import (
     rank_sections,
     requires_synthesis,
     resolve_question,
-    run_knowledge_turn,
+    synthesize_knowledge_answer,
 )
-from onyx.chat.models import ChatMessageSimple
+from onyx.chat.models import PersonaPromptConfig
 from onyx.configs.constants import DocumentSource, MessageType
 from onyx.context.search.models import SearchDoc, SearchDocsResponse
 from onyx.error_handling.exceptions import OnyxError
-from onyx.llm.models import AssistantMessage, TextContent
-from onyx.tools.models import ToolResponse
+from onyx.llm.models import AssistantMessage, TextContent, ToolResult, UserMessage
 
 
 def message(text, kind=MessageType.USER):
-    return ChatMessageSimple(message=text, token_count=10, message_type=kind)
+    if kind == MessageType.USER:
+        return UserMessage(content=text)
+    return AssistantMessage(content=[TextContent(text=text)])
 
 
 def doc():
@@ -137,13 +136,13 @@ class KnowledgeTests(unittest.TestCase):
             [] if empty else ["QEdge 提供 Sitecore 开发、实施和迁移服务。"]
         )
         docs = [] if empty else [d]
-        tool.run.return_value = ToolResponse(
-            rich_response=SearchDocsResponse(
+        tool.run.return_value = ToolResult(
+            details=SearchDocsResponse(
                 search_docs=docs,
                 displayed_docs=docs,
                 citation_mapping={1: d.document_id} if docs else {},
             ),
-            llm_facing_response=__import__("json").dumps(
+            content=__import__("json").dumps(
                 {
                     "results": [
                         {
@@ -161,18 +160,21 @@ class KnowledgeTests(unittest.TestCase):
         llm.invoke.return_value = AssistantMessage(
             content=[TextContent(text=response or "QEdge 提供 Sitecore 实施服务。[1]")]
         )
-        state = ChatStateContainer()
-        emitter = MagicMock(spec=NullEmitter)
-        run_knowledge_turn(
-            emitter=emitter,
-            state=state,
-            history=[message(question)],
-            tools=[tool],
-            persona=NS(id=2, system_prompt="", task_prompt=""),
+        llm.config.model_name = "test-flash"
+        state = synthesize_knowledge_answer(
+            question=resolve_question([message(question)]),
+            current_question=resolve_question([message(question)]),
+            response=tool.run.return_value,
+            persona=PersonaPromptConfig(
+                system_prompt="",
+                task_prompt="",
+                datetime_aware=False,
+                replace_base_system_prompt=False,
+            ),
             llm=llm,
             force_deep=deep,
         )
-        return state, llm, tool, emitter
+        return state, llm, tool, None
 
     @patch("onyx.chat.knowledge_rag.get_rerank_credentials", return_value=None)
     def test_missing_reranker_preserves_bilingual_service_recall(self, _credentials):
@@ -211,8 +213,8 @@ class KnowledgeTests(unittest.TestCase):
             "概括的服务总结。[1,1]",
         ]:
             state, _, _, _ = self.run_turn(response=text)
-            self.assertEqual(state.get_request_params()["qedge_rag_mode"], "summary")
-            self.assertNotIn("直接摘录", state.get_answer_tokens())
+            self.assertEqual(state.request_params["qedge_rag_mode"], "summary")
+            self.assertNotIn("直接摘录", state.answer)
 
     def test_flash_is_used_for_all_question_depths(self):
         from onyx.chat.knowledge_rag import summary_model_override
@@ -263,21 +265,17 @@ class KnowledgeTests(unittest.TestCase):
     def test_simple_answer_uses_one_grounded_summary(self):
         state, llm, tool, emitter = self.run_turn()
         self.assertEqual(llm.invoke.call_count, 1)
-        self.assertEqual(state.get_request_params()["generative_model_calls"], 1)
-        self.assertIn("实施服务", state.get_answer_tokens())
-        self.assertNotIn("直接摘录", state.get_answer_tokens())
-        self.assertEqual(state.get_emitted_citations(), {1})
-        self.assertEqual(len(state.get_tool_calls()), 1)
-        saved = __import__("json").loads(state.get_tool_calls()[0].tool_call_response)
-        self.assertIn("search_docs", saved)
-        packets = [call.args[0].obj.type for call in emitter.emit.call_args_list]
-        self.assertLess(packets.index("section_end"), packets.index("message_start"))
+        self.assertEqual(state.request_params["generative_model_calls"], 1)
+        self.assertIn("实施服务", state.answer)
+        self.assertNotIn("直接摘录", state.answer)
+        self.assertEqual(set(state.citations), {1})
+        self.assertEqual(state.citations[1].document_id, doc().document_id)
 
     def test_empty_evidence_does_not_generate_even_for_deep_question(self):
         state, llm, _, _ = self.run_turn(empty=True, deep=True)
         llm.invoke.assert_not_called()
-        self.assertIn("无法确认", state.get_answer_tokens())
-        self.assertEqual(state.get_emitted_citations(), set())
+        self.assertIn("无法确认", state.answer)
+        self.assertEqual(set(state.citations), set())
 
     def test_deep_answer_uses_one_grounded_generation(self):
         state, llm, _, _ = self.run_turn(question="比较实施范围", deep=True)
@@ -285,14 +283,12 @@ class KnowledgeTests(unittest.TestCase):
         request = llm.invoke.call_args.args[0]
         self.assertFalse(request.tools)
         self.assertIn("evidence", request.messages[0].text)
-        self.assertEqual(state.get_request_params()["qedge_rag_mode"], "deep_summary")
+        self.assertEqual(state.request_params["qedge_rag_mode"], "deep_summary")
 
     def test_unknown_citation_does_not_return_unverified_summary(self):
         state, llm, _, _ = self.run_turn(deep=True, response="Unsupported claim [99]")
-        self.assertNotIn("Unsupported", state.get_answer_tokens())
-        self.assertEqual(
-            state.get_request_params()["qedge_rag_mode"], "summary_unavailable"
-        )
+        self.assertNotIn("Unsupported", state.answer)
+        self.assertEqual(state.request_params["qedge_rag_mode"], "summary_unavailable")
 
     def test_generation_failure_never_returns_excerpts(self):
         with patch(
@@ -300,12 +296,29 @@ class KnowledgeTests(unittest.TestCase):
             side_effect=ValueError("test failure"),
         ):
             state, _, _, _ = self.run_turn(deep=True)
-        self.assertIn("未能生成", state.get_answer_tokens())
+        self.assertIn("未能生成", state.answer)
 
     def test_empty_document_set_cannot_escape_agent_scope(self):
-        from onyx.context.search.models import BaseFilters
+        from onyx.context.search.models import BaseFilters, PersonaSearchInfo
+        from onyx.tools.models import ToolContext
+        from onyx.tools.tool_implementations.search.search_tool import SearchTool
 
-        _, _, tool, _ = self.run_turn(filters=BaseFilters(document_set=[]))
+        tool = SearchTool.__new__(SearchTool)
+        tool.persona_search_info = PersonaSearchInfo(
+            document_set_names=["www.qedge.cn"],
+            search_start_date=None,
+            attached_document_ids=[],
+            hierarchy_node_ids=[],
+        )
+        tool.user_selected_filters = BaseFilters(document_set=[], source_type=[])
+        tool.project_id_filter = None
+        tool.persona_id_filter = None
+        tool.search(
+            ["services"],
+            original_query="services",
+            message_history=[],
+            context=ToolContext(grounded_fast_mode=True),
+        )
         self.assertEqual(tool.user_selected_filters.document_set, ["www.qedge.cn"])
 
     def test_automatic_title_uses_no_generation(self):
@@ -315,11 +328,16 @@ class KnowledgeTests(unittest.TestCase):
             _generate_or_fallback_chat_session_name,
         )
 
-        with patch(
-            "onyx.server.query_and_chat.chat_backend.get_default_utility_llm"
-        ) as model:
+        with (
+            patch("onyx.chat.knowledge_rag.enabled", return_value=True),
+            patch(
+                "onyx.server.query_and_chat.chat_backend.get_default_utility_llm"
+            ) as model,
+        ):
             title = _generate_or_fallback_chat_session_name(
-                chat_history=[message("Sitecore services")],
+                chat_history=[
+                    NS(message="Sitecore services", message_type=MessageType.USER)
+                ],
                 request=None,
                 user=NS(id="test-user"),
                 chat_session_id=uuid4(),
@@ -330,20 +348,25 @@ class KnowledgeTests(unittest.TestCase):
         model.assert_not_called()
 
     def test_agent_scope_cannot_be_widened(self):
-        tool = MagicMock()
-        tool.name = "internal_search"
-        tool.persona_search_info = NS(document_set_names=["qedge.ai"])
-        tool.user_selected_filters = NS(document_set=["www.qedge.cn"])
+        from onyx.context.search.models import BaseFilters, PersonaSearchInfo
+        from onyx.tools.models import ToolContext
+        from onyx.tools.tool_implementations.search.search_tool import SearchTool
+
+        tool = SearchTool.__new__(SearchTool)
+        tool.persona_search_info = PersonaSearchInfo(
+            document_set_names=["qedge.ai"],
+            search_start_date=None,
+            attached_document_ids=[],
+            hierarchy_node_ids=[],
+        )
+        tool.user_selected_filters = BaseFilters(document_set=["www.qedge.cn"])
         with self.assertRaises(OnyxError):
-            run_knowledge_turn(
-                emitter=NullEmitter(),
-                state=ChatStateContainer(),
-                history=[message("services")],
-                tools=[tool],
-                persona=NS(id=1),
-                llm=MagicMock(),
+            tool.search(
+                ["services"],
+                original_query="services",
+                message_history=[],
+                context=ToolContext(grounded_fast_mode=True),
             )
-        tool.run.assert_not_called()
 
     @patch("onyx.chat.knowledge_rag.requests.post")
     @patch(

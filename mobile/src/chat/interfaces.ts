@@ -1,8 +1,11 @@
 import { Packet } from "./streamingModels";
 
-export type MessageType = "user" | "assistant" | "system" | "error";
+// agent_results is the hidden question node of an automatic follow-up response.
+export type MessageType =
+  "user" | "assistant" | "agent_results" | "system" | "error";
 
-export type ChatState = "input" | "loading" | "streaming" | "uploading";
+export type ChatState =
+  "input" | "loading" | "streaming" | "uploading" | "settling" | "unconfirmed";
 
 export enum ChatFileType {
   IMAGE = "image",
@@ -22,6 +25,15 @@ export interface FileDescriptor {
 
 // nodeId = client tree key (negative/temp until the backend assigns messageId).
 export interface Message {
+  // Null means no saved SDK outcome; absent means an older API.
+  responseStatus?:
+    | "running"
+    | "suspended"
+    | "complete"
+    | "limit"
+    | "cancelled"
+    | "error"
+    | null;
   messageId?: number;
   nodeId: number;
   parentNodeId: number | null;
@@ -42,6 +54,7 @@ export interface Message {
 
 // Subset of a loaded session-snapshot row (GET get-chat-session).
 export interface BackendMessage {
+  response_status?: Message["responseStatus"];
   message_id: number;
   message_type: string;
   parent_message: number | null;

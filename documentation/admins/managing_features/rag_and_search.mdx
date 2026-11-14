@@ -16,7 +16,7 @@ Each user sees only documents they are allowed to see.
 | Connectors | **Admin Panel → Connectors** | Decide which sources Onyx indexes. See [Connectors](/admins/managing_features/connectors_link). |
 | Document Sets | **Admin Panel → Document Sets** | Group connectors into filters for users and Agents. See [Document Sets](/admins/managing_features/document_sets). |
 | Index Settings | **Admin Panel → Index Settings** | Choose the embedding model and options such as **Contextual Retrieval**, **Multipass Indexing**, **Extract & Caption Images**, and **Vector Quantization**. Not shown on Onyx Cloud, where Onyx manages the index. See [Search Configs](/admins/advanced_configs/search_configs). |
-| Search Selection Model | **Admin Panel → Chat Preferences** | The model that selects and checks retrieved documents. |
+| Search Decision Model | **Admin Panel → Chat Preferences** | The language model or decision model that picks retrieved documents and decides how much surrounding text to add. |
 | Search Mode | **Admin Panel → Chat Preferences** | A quick document search view. Needs a Business or Enterprise plan, or Onyx Cloud. |
 | Auto-Detect Search Filters | **Admin Panel → Chat Preferences** | Applies source and time filters that Onyx infers from the query. |
 
@@ -44,7 +44,8 @@ The optional `response_language` chat request field accepts `en` or `zh` as a fa
 A query containing only `QEdge` retrieves company information instead of treating the company name as an empty query.
 
 The route retrieves fresh documents for each request and preserves user permissions and Document Set filters.
-Previous assistant answers are not factual evidence.
+Previous assistant answers are not factual evidence. When the answer speaks for QEdge,
+it uses first-person language without adding unsupported claims.
 Follow-up questions can reuse the previous user question for context. If the index lacks relevant evidence,
 the response states that limitation. If summary generation fails,
 the response asks you to retry instead of displaying excerpts.
@@ -55,5 +56,7 @@ The dedicated reranker requires an existing SiliconFlow provider. Without it, le
 Only relevance scores are cached for 120 seconds. Answers and document access decisions are not cached.
 
 File attachments, Projects, incognito sessions, and multi-model conversations use the standard Onyx route.
+Knowledge answers support Stop and saved conversation replay.
+Messages sent during a knowledge answer wait for the next turn.
 Remove an Agent ID from `QEDGE_RAG_PERSONAS` and restart the backend services to disable this custom route for that
 Agent.

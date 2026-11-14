@@ -81,7 +81,7 @@ Status checked against LiteLLM v1.100.4 (2026-10-27):
      unconditionally and pass the remainder through as the literal model id
    STATUS: STILL NEEDED - v1.100.4 consults the registry before honoring the prefix.
 
-8. Disabled Thinking Dropped On Tool Turns (_patch_anthropic_keeps_disabled_thinking):
+8. Thinking Dropped On Tool Turns (_patch_anthropic_keeps_requested_thinking):
    - AnthropicConfig.transform_request drops the thinking param when the last
      assistant message with tool_calls carries no thinking blocks, guarding against
      "Expected thinking or redacted_thinking, but found tool_use"
@@ -91,6 +91,10 @@ Status checked against LiteLLM v1.100.4 (2026-10-27):
      thinking is the state in which Anthropic requires those blocks to be absent
    - Reasoning off then silently becomes the API's own default on every turn after a
      tool call, which on the Claude 5 line is full reasoning
+   - The API also accepts enabled thinking after tool calls without thinking
+     blocks. Onyx sends that only when the model chose not to think on a step or
+     a replayed block's prefix changed, and the drop then keeps thinking off for
+     the rest of the session. So every thinking type is kept
    - Bedrock Converse carries its own copy of the same check in
      AmazonConverseConfig._transform_request_helper, and keeps thinking under
      additionalModelRequestFields rather than at the top level, so both transforms
@@ -118,6 +122,15 @@ Status checked against LiteLLM v1.100.4 (2026-10-27):
      e.g. a reply whose whole output budget went to thinking. A non-streamed
      response then has no choices; streaming adds an empty choice for the same reply
    STATUS: STILL NEEDED - Fixed upstream by v1.106.4; drop once we are on it.
+
+11. Bridge Drops User Cache Breakpoints (_patch_responses_bridge_keeps_breakpoints):
+   - The completions -> responses bridge rebuilds each chat-completions `text` part
+     of a user message as a bare `input_text` part, so the part's
+     `prompt_cache_breakpoint` is lost. LiteLLM's own message injection points
+     lose it the same way
+   - Our patch copies the marker onto the converted `input_text` part
+   STATUS: STILL NEEDED - v1.100.4 keeps markers only on parts that are already
+           `input_text`, and LiteLLM rejects that type in a user message.
 
 """
 
@@ -760,29 +773,23 @@ def _patch_responses_api_bridge_check() -> None:
 
 # The thinking types that turn up-front thinking off: disabled everywhere it is
 # accepted, between_tools on Sonnet 5.5, which rejects disabled.
-_THINKING_OFF_TYPES = frozenset({"disabled", "between_tools"})
-
-
-def _thinking_off(optional_params: dict) -> dict | None:
-    """The thinking param when it explicitly asks for no up-front thinking."""
+def _requested_thinking(optional_params: dict) -> dict | None:
     thinking = optional_params.get("thinking")
-    if isinstance(thinking, dict) and thinking.get("type") in _THINKING_OFF_TYPES:
-        return thinking
-    return None
+    return thinking if isinstance(thinking, dict) else None
 
 
-def _patch_anthropic_keeps_disabled_thinking() -> None:
+def _patch_anthropic_keeps_requested_thinking() -> None:
     """
-    Patches the two Anthropic request transforms to keep an explicit off
-    thinking type (disabled, or between_tools on Sonnet 5.5) on a turn whose
-    history carries tool calls with no thinking blocks.
+    Patches the two Anthropic request transforms to keep the requested
+    thinking param on a turn whose history carries tool calls with no
+    thinking blocks.
 
     Upstream drops the param there to avoid "Expected thinking or
-    redacted_thinking, but found tool_use", but it gates on `thinking is not
-    None` rather than on thinking being enabled. Off thinking cannot raise
-    that error: it is the state where Anthropic requires the blocks to be
-    absent, which is exactly what we send. Dropping it silently returns the
-    model to its default effort, which on the Claude 5 line is full reasoning.
+    redacted_thinking, but found tool_use". The Anthropic API accepts that
+    history on every current Claude model, and Onyx sends it only when the
+    model chose not to think or a replayed block's prefix changed. Dropping
+    the param instead turns thinking off for the rest of the session, or on
+    the Claude 5 line resets it to the model's default effort.
 
     Bedrock Converse carries its own copy of the same check, and puts thinking
     under additionalModelRequestFields rather than at the top level, so it
@@ -805,7 +812,7 @@ def _patch_anthropic_keeps_disabled_thinking() -> None:
             litellm_params: dict,
             headers: dict,
         ) -> dict:
-            thinking = _thinking_off(optional_params)
+            thinking = _requested_thinking(optional_params)
             body = original_transform_request(
                 self, model, messages, optional_params, litellm_params, headers
             )
@@ -834,7 +841,7 @@ def _patch_anthropic_keeps_disabled_thinking() -> None:
             drop_params: bool = False,
             litellm_params: Optional[Mapping[str, object]] = None,
         ) -> Any:
-            thinking = _thinking_off(optional_params)
+            thinking = _requested_thinking(optional_params)
             data = original_request_helper(
                 self,
                 model=model,
@@ -989,6 +996,41 @@ def _patch_vertex_gemini_newer_models() -> None:
     )
 
 
+_original_convert_content_to_responses_format = (
+    LiteLLMResponsesTransformationHandler._convert_content_to_responses_format
+)
+_BREAKPOINT_KEY = "prompt_cache_breakpoint"
+
+
+def _patch_responses_bridge_keeps_breakpoints() -> None:
+    if (
+        LiteLLMResponsesTransformationHandler._convert_content_to_responses_format.__name__
+        == "_patched_convert_content_to_responses_format"
+    ):
+        return
+
+    def _patched_convert_content_to_responses_format(
+        self: Any, content: Any, role: str
+    ) -> list[dict[str, object]]:
+        if role != "user" or not isinstance(content, list):
+            return _original_convert_content_to_responses_format(self, content, role)
+        # Each part converts on its own, so converting part by part keeps the order.
+        result: list[dict[str, object]] = []
+        for part in content:
+            converted = _original_convert_content_to_responses_format(
+                self, [part], role
+            )
+            marker = part.get(_BREAKPOINT_KEY) if isinstance(part, dict) else None
+            if marker is not None and len(converted) == 1:
+                converted = [{**converted[0], _BREAKPOINT_KEY: marker}]
+            result.extend(converted)
+        return result
+
+    LiteLLMResponsesTransformationHandler._convert_content_to_responses_format = (  # type: ignore[method-assign]
+        _patched_convert_content_to_responses_format
+    )
+
+
 def apply_monkey_patches() -> None:
     """
     Apply all necessary monkey patches to LiteLLM for compatibility.
@@ -1002,9 +1044,10 @@ def apply_monkey_patches() -> None:
     - Patching ResponsesAPIResponse.model_construct to fix usage format in all code paths
     - Patching Logging._get_assembled_streaming_response to avoid mutating original response
     - Patching responses_api_bridge_check to always honor an explicit responses/ prefix
-    - Patching AnthropicConfig.transform_request to keep disabled thinking on tool turns
+    - Patching AnthropicConfig.transform_request to keep requested thinking on tool turns
     - Patching OpenRouterChatCompletionStreamingHandler.chunk_parser to keep the served model
     - Patching VertexGeminiConfig for Gemini 4+ thinking and content-less candidates
+    - Patching the responses bridge to keep cache breakpoints on user text parts
     """
     _patch_ollama_chunk_parser()
     _patch_responses_reasoning_summary_newlines()
@@ -1013,6 +1056,7 @@ def apply_monkey_patches() -> None:
     _patch_responses_api_usage_format()
     _patch_logging_assembled_streaming_response()
     _patch_responses_api_bridge_check()
-    _patch_anthropic_keeps_disabled_thinking()
+    _patch_anthropic_keeps_requested_thinking()
     _patch_openrouter_routed_model()
     _patch_vertex_gemini_newer_models()
+    _patch_responses_bridge_keeps_breakpoints()

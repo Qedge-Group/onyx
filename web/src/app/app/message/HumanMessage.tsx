@@ -1,13 +1,12 @@
 "use client";
 
 import React, { useEffect, useMemo, useRef, useState } from "react";
-import { FileDescriptor } from "@/app/app/interfaces";
+import { FileDescriptor } from "@/app/app/types";
 import "katex/dist/katex.min.css";
 import MessageSwitcher from "@/app/app/message/MessageSwitcher";
-import Text from "@/refresh-components/texts/Text";
 import { cn } from "@opal/utils";
 import useScreenSize from "@/hooks/useScreenSize";
-import { CopyButton } from "@opal/components";
+import { CopyButton, Text } from "@opal/components";
 import { Button } from "@opal/components";
 import { SvgEdit } from "@opal/icons";
 import { Hoverable } from "@opal/core";
@@ -82,6 +81,35 @@ function MessageEditing({
           <Button prominence="secondary" onClick={handleCancel}>
             {t("messageEditing.cancelButton.label")}
           </Button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+export function HumanMessageBubble({ content }: { content: string }) {
+  return (
+    <div data-testid="human-message-bubble" className="md:max-w-150">
+      <div
+        className={
+          "max-w-120 md:max-w-150 whitespace-break-spaces break-anywhere rounded-t-16 rounded-es-16 bg-background-tint-02 py-2 px-3"
+        }
+        onCopy={(e) => {
+          const selection = window.getSelection();
+          if (selection) {
+            e.preventDefault();
+            const text = selection
+              .toString()
+              .replace(/\n{2,}/g, "\n")
+              .trim();
+            e.clipboardData.setData("text/plain", text);
+          }
+        }}
+      >
+        <div className="inline-block align-middle">
+          <Text as="p" dir="auto" font="main-content-body" color="text-04">
+            {content}
+          </Text>
         </div>
       </div>
     </div>
@@ -229,34 +257,7 @@ const HumanMessage = React.memo(function HumanMessage({
         ) : (
           <div className="flex justify-end">
             {!isMobile && copyEditButton}
-            <div className="md:max-w-150">
-              <div
-                className={
-                  "max-w-120 md:max-w-150 whitespace-break-spaces break-anywhere rounded-t-16 rounded-es-16 bg-background-tint-02 py-2 px-3"
-                }
-                onCopy={(e) => {
-                  const selection = window.getSelection();
-                  if (selection) {
-                    e.preventDefault();
-                    const text = selection
-                      .toString()
-                      .replace(/\n{2,}/g, "\n")
-                      .trim();
-                    e.clipboardData.setData("text/plain", text);
-                  }
-                }}
-              >
-                <Text
-                  as="p"
-                  dir="auto"
-                  className="inline-block align-middle"
-                  mainContentBody
-                  text04
-                >
-                  {content}
-                </Text>
-              </div>
-            </div>
+            <HumanMessageBubble content={content} />
           </div>
         )}
         <div className="flex justify-end pt-1">

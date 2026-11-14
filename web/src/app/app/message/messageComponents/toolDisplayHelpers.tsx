@@ -1,13 +1,15 @@
-import { FiList } from "react-icons/fi";
 import type { useTranslations } from "next-intl";
 import type { IconFunctionComponent } from "@opal/types";
 import {
+  CustomToolStart,
   Packet,
   PacketType,
   SearchToolPacket,
 } from "@/app/app/services/streamingModels";
-import { constructCurrentSearchState } from "./timeline/renderers/search/searchStateUtils";
+import { constructCurrentSearchState } from "@/app/app/message/messageComponents/timeline/renderers/search/searchStateUtils";
+import { isGroupEndPacket } from "@/app/app/message/messageComponents/timeline/packetHelpers";
 import {
+  SvgListCheck,
   SvgGlobe,
   SvgSearchMenu,
   SvgTerminal,
@@ -30,42 +32,11 @@ export function hasToolError(packets: Packet[]): boolean {
 }
 
 /**
- * Check if a tool group is complete.
- * For research agents, we only look at parent-level SECTION_END packets (sub_turn_index is undefined/null),
- * not the SECTION_END packets from nested tools (which have sub_turn_index as a number).
+ * Check if a tool group is complete: a parent-level SECTION_END or ERROR
+ * arrived. Nested calls end with their own SECTION_END and do not count.
  */
 export function isToolComplete(packets: Packet[]): boolean {
-  const firstPacket = packets[0];
-  if (!firstPacket) return false;
-
-  // For research agents, only parent-level SECTION_END indicates completion
-  // Nested tools (search, fetch, etc.) within the research agent have sub_turn_index set
-  if (firstPacket.obj.type === PacketType.RESEARCH_AGENT_START) {
-    return packets.some(
-      (p) =>
-        (p.obj.type === PacketType.SECTION_END ||
-          p.obj.type === PacketType.ERROR) &&
-        (p.placement.sub_turn_index === undefined ||
-          p.placement.sub_turn_index === null)
-    );
-  }
-
-  // For coding agents, the CodingAgentFinal packet (or an error) marks completion.
-  // Nested BashTool packets are part of the same group and don't indicate the
-  // agent is done.
-  if (firstPacket.obj.type === PacketType.CODING_AGENT_START) {
-    return packets.some(
-      (p) =>
-        p.obj.type === PacketType.CODING_AGENT_FINAL ||
-        p.obj.type === PacketType.ERROR
-    );
-  }
-
-  // For other tools, any SECTION_END or ERROR indicates completion
-  return packets.some(
-    (p) =>
-      p.obj.type === PacketType.SECTION_END || p.obj.type === PacketType.ERROR
-  );
+  return packets.some(isGroupEndPacket);
 }
 
 /**
@@ -75,7 +46,7 @@ export function getToolErrorIcon(): React.ReactNode {
   return <SvgXCircle className="w-3.5 h-3.5 text-error" />;
 }
 
-export function getToolKey(turn_index: number, tab_index: number): string {
+export function getToolKey(turn_index: number, tab_index: number = 0): string {
   return `${turn_index}-${tab_index}`;
 }
 
@@ -111,11 +82,12 @@ export function getToolName(packets: Packet[], t: TimelineTranslate): string {
       return t("toolNames.codeInterpreter");
     case PacketType.FETCH_TOOL_START:
       return t("toolNames.openUrls");
-    case PacketType.CUSTOM_TOOL_START:
+    case PacketType.CUSTOM_TOOL_START: {
       return (
-        (firstPacket.obj as { tool_name?: string }).tool_name ||
+        (firstPacket.obj as CustomToolStart).display_name ||
         t("toolNames.customTool")
       );
+    }
     case PacketType.IMAGE_GENERATION_TOOL_START:
       return t("toolNames.generateImage");
     case PacketType.DEEP_RESEARCH_PLAN_START:
@@ -154,7 +126,7 @@ export function getToolIcon(packets: Packet[]): IconFunctionComponent {
     case PacketType.IMAGE_GENERATION_TOOL_START:
       return SvgImage;
     case PacketType.DEEP_RESEARCH_PLAN_START:
-      return FiList;
+      return SvgListCheck;
     case PacketType.RESEARCH_AGENT_START:
       return SvgUser;
     case PacketType.CODING_AGENT_START:

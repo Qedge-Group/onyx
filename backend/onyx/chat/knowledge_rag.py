@@ -8,17 +8,15 @@ import hashlib
 import json
 import os
 import re
-import time
-from typing import TYPE_CHECKING, Literal, TypedDict, cast
+from collections.abc import Sequence
+from typing import Literal, TypedDict, cast
 from urllib.parse import urlsplit
-from uuid import uuid4
 
 import requests
+from pydantic import BaseModel, Field, JsonValue
 
 from onyx.cache.factory import get_cache_backend
-from onyx.chat.chat_state import ChatStateContainer
-from onyx.chat.emitter import Emitter
-from onyx.chat.models import ChatMessageSimple
+from onyx.chat.models import PersonaPromptConfig
 from onyx.context.search.models import (
     IndexFilters,
     InferenceChunk,
@@ -27,36 +25,22 @@ from onyx.context.search.models import (
     SearchDocsResponse,
 )
 from onyx.db.knowledge_rag import get_indexed_case_document_ids, get_rerank_credentials
-from onyx.db.models import Persona
 from onyx.document_index.interfaces import DocumentIndex, DocumentSectionRequest
 from onyx.error_handling.error_codes import OnyxErrorCode
 from onyx.error_handling.exceptions import OnyxError
-from onyx.llm.interfaces import LLM, LlmRequestPolicy
-from onyx.llm.override_models import LLMOverride
-from onyx.tools.interface import Tool
-from onyx.tracing.flows import LLMFlow
-from onyx.tracing.llm_utils import traced_llm_call
-
-if TYPE_CHECKING:
-    from onyx.tools.tool_implementations.search.search_tool import SearchTool
-from onyx.configs.constants import MessageType
-from onyx.llm.interfaces import GenerationContext
+from onyx.llm.interfaces import LLM, GenerationContext, LlmRequestPolicy
 from onyx.llm.models import (
     GenerationOptions,
     GenerationRequest,
+    Message,
     ReasoningEffort,
+    ToolResult,
+    Usage,
     UserMessage,
 )
-from onyx.server.query_and_chat.placement import Placement
-from onyx.server.query_and_chat.streaming_models import (
-    AgentResponseDelta,
-    AgentResponseStart,
-    CitationInfo,
-    Packet,
-    SearchToolStart,
-    SectionEnd,
-)
-from onyx.tools.models import SearchToolOverrideKwargs, ToolCallInfo
+from onyx.llm.override_models import LLMOverride
+from onyx.tracing.flows import LLMFlow
+from onyx.tracing.llm_utils import traced_llm_call
 from onyx.utils.logger import setup_logger
 
 logger = setup_logger()
@@ -116,6 +100,24 @@ def enabled(persona_id: int) -> bool:
     return persona_id in PERSONAS
 
 
+def knowledge_route_enabled(
+    persona_id: int | None,
+    *,
+    model_count: int,
+    has_files: bool,
+    project_id: int | None,
+    incognito: bool,
+) -> bool:
+    return (
+        persona_id is not None
+        and enabled(persona_id)
+        and model_count == 1
+        and not has_files
+        and project_id is None
+        and not incognito
+    )
+
+
 def requires_synthesis(question: str, force: bool = False) -> bool:
     return force or bool(_DEEP.search(question))
 
@@ -137,11 +139,9 @@ def summary_request_policy(provider: str) -> LlmRequestPolicy:
     return LlmRequestPolicy()
 
 
-def resolve_question(history: list[ChatMessageSimple]) -> str:
+def resolve_question(history: Sequence[Message]) -> str:
     questions = [
-        m.message.strip()
-        for m in history
-        if m.message_type == MessageType.USER and m.message.strip()
+        m.text.strip() for m in history if isinstance(m, UserMessage) and m.text.strip()
     ]
     questions = [
         q.split("\n\n问题：", 1)[1].strip()
@@ -529,24 +529,25 @@ def answer_language(
     return "en" if re.search(r"[a-z]", question, re.IGNORECASE) else fallback or "zh"
 
 
-def run_knowledge_turn(
+class KnowledgeAnswer(BaseModel):
+    answer: str
+    citations: dict[int, SearchDoc] = Field(default_factory=dict)
+    request_params: dict[str, JsonValue]
+    usage: Usage | None = None
+
+
+def synthesize_knowledge_answer(
     *,
-    emitter: Emitter,
-    state: ChatStateContainer,
-    history: list[ChatMessageSimple],
-    tools: list[Tool],
-    persona: Persona,
+    question: str,
+    current_question: str,
+    response: ToolResult,
+    persona: PersonaPromptConfig,
     llm: LLM,
     force_deep: bool = False,
     include_citations: bool = True,
     response_language: Literal["en", "zh"] | None = None,
-) -> None:
-    start = time.monotonic()
-    question = resolve_question(history)
-    latest_user = next(
-        (m for m in reversed(history) if m.message_type == MessageType.USER), None
-    )
-    current_question = resolve_question([latest_user]) if latest_user else question
+    context: GenerationContext | None = None,
+) -> KnowledgeAnswer:
     english = answer_language(current_question, response_language) == "en"
     synthesis_question = (
         (
@@ -557,75 +558,17 @@ def run_knowledge_turn(
         if _COMPANY_NAME.fullmatch(question)
         else question
     )
-    search = cast(
-        "SearchTool | None",
-        next((t for t in tools if t.name == "internal_search"), None),
-    )
-    if search is None:
-        raise OnyxError(
-            OnyxErrorCode.VALIDATION_ERROR,
-            "Knowledge mode requires the configured internal search tool",
-        )
-    configured = set(search.persona_search_info.document_set_names or [])
-    selected = (
-        set(search.user_selected_filters.document_set or [])
-        if search.user_selected_filters
-        else set()
-    )
-    if (
-        configured
-        and search.user_selected_filters is not None
-        and search.user_selected_filters.document_set == []
-    ):
-        search.user_selected_filters = search.user_selected_filters.model_copy(
-            update={"document_set": sorted(configured)}
-        )
-    if configured and selected and not selected.issubset(configured):
-        raise OnyxError(
-            OnyxErrorCode.INSUFFICIENT_PERMISSIONS,
-            "Document set exceeds this knowledge agent scope",
-        )
-    placement = Placement(turn_index=0, tab_index=0)
-    emitter.tool_started(is_search=True)
-    emitter.emit(Packet(placement=placement, obj=SearchToolStart()))
-    retrieval_query = focus_query(question)
-    try:
-        response = search.run(
-            placement=placement,
-            override_kwargs=SearchToolOverrideKwargs(
-                starting_citation_num=1,
-                original_query=retrieval_query,
-                grounded_fast_mode=True,
-                skip_query_expansion=True,
-                num_hits=50,
-                max_llm_chunks=12,
-            ),
-            queries=[retrieval_query],
-        )
-    finally:
-        emitter.emit(Packet(placement=placement, obj=SectionEnd()))
-    rich = response.rich_response
-    if not isinstance(rich, SearchDocsResponse):
+    rich = response.details
+    if response.is_error or not isinstance(rich, SearchDocsResponse):
         raise OnyxError(OnyxErrorCode.BAD_GATEWAY, "Invalid internal search response")
     docs = rich.displayed_docs if rich.displayed_docs is not None else rich.search_docs
-    state.add_search_docs(docs)
-    state.add_tool_call(
-        ToolCallInfo(
-            parent_tool_call_id=None,
-            turn_index=0,
-            tab_index=0,
-            tool_name=search.name,
-            tool_call_id=str(uuid4()),
-            tool_id=search.id,
-            reasoning_tokens=None,
-            tool_call_arguments={"queries": [question]},
-            tool_call_response=rich.model_dump_json(),
-            search_docs=docs,
-        )
-    )
-    # Tool response uses document-number objects. Rebuild evidence only from
-    # the exact selected sections, not from any prior conversation.
-    excerpts = search._grounded_evidence
+    usage: Usage | None = None
+    by_id = {doc.document_id: doc for doc in docs}
+    sources = {
+        number: by_id[doc_id]
+        for number, doc_id in rich.citation_mapping.items()
+        if doc_id in by_id
+    }
     answer = (
         "I could not find sufficiently relevant evidence in the configured knowledge base."
         if english
@@ -634,10 +577,8 @@ def run_knowledge_turn(
     cited: dict[int, SearchDoc] = {}
     generated = False
     attempted = False
-    if docs and excerpts:
-        compact = cast(
-            dict[str, list[Evidence]], json.loads(response.llm_facing_response)
-        )
+    if docs:
+        compact = cast(dict[str, list[Evidence]], json.loads(response.text))
         available_evidence = compact.get("results", [])
         if available_evidence:
             evidence: list[Evidence] = [
@@ -679,6 +620,7 @@ def run_knowledge_turn(
                     if english
                     else "使用简体中文，历史别名科睿哲统一改为 QEdge。 "
                 )
+                + "When speaking for QEdge, use we/our or 我们, without inventing experience or claims. "
                 + (persona.system_prompt or "")
                 + "\n"
                 + (persona.task_prompt or "")
@@ -689,7 +631,6 @@ def run_knowledge_turn(
             numbers: set[int] = set()
             try:
                 attempted = True
-                emitter.llm_step_started()
                 result = llm.invoke(
                     GenerationRequest(
                         system_prompt=system,
@@ -712,13 +653,16 @@ def run_knowledge_turn(
                             else 1100,
                         ),
                     ),
-                    context=GenerationContext(
-                        total_timeout_s=45
-                        if requires_synthesis(question, force_deep)
-                        else 30,
-                        flow=LLMFlow.KNOWLEDGE_SYNTHESIS,
+                    context=(context or GenerationContext()).model_copy(
+                        update={
+                            "total_timeout_s": 45
+                            if requires_synthesis(question, force_deep)
+                            else 30,
+                            "flow": LLMFlow.KNOWLEDGE_SYNTHESIS,
+                        }
                     ),
                 )
+                usage = result.usage
                 text = (result.text or "").strip()
                 text = re.sub(r"【(\d+)】", r"[\1]", text)
                 text = re.sub(r"\[\[(\d+)\]\]", r"[\1]", text)
@@ -733,18 +677,18 @@ def run_knowledge_turn(
                     and not re.search(r"^\s*>", text, re.MULTILINE)
                     and numbers
                     and numbers.issubset({item["document"] for item in evidence})
+                    and numbers.issubset(sources)
                 ):
-                    if persona.id == 2:
-                        text = text.replace("科睿哲", "QEdge")
+                    text = text.replace("科睿哲", "QEdge")
                     cited = (
-                        {i: docs[i - 1] for i in sorted(numbers)}
+                        {i: sources[i] for i in sorted(numbers)}
                         if include_citations
                         else {}
                     )
                     answer = re.sub(
                         r"\[(\d+)\]",
                         lambda m: (
-                            f"[[{m[1]}]]({docs[int(m[1]) - 1].link or docs[int(m[1]) - 1].document_id})"
+                            f"[[{m[1]}]]({sources[int(m[1])].link or sources[int(m[1])].document_id})"
                             if include_citations
                             else ""
                         ),
@@ -766,11 +710,11 @@ def run_knowledge_turn(
                     if english
                     else "已找到相关知识库资料，但本次未能生成通过引用校验的总结，请重试。"
                 )
-    state.set_answer_tokens(answer)
-    state.set_citation_mapping(cited)
-    state.set_pre_answer_processing_time(time.monotonic() - start)
-    state.set_request_params(
-        {
+    return KnowledgeAnswer(
+        answer=answer,
+        citations=cited,
+        usage=usage,
+        request_params={
             "qedge_response_language": "en" if english else "zh",
             "qedge_rag_mode": (
                 "deep_summary"
@@ -781,36 +725,5 @@ def run_knowledge_turn(
             else ("summary_unavailable" if attempted else "insufficient_evidence"),
             "generative_model_calls": int(attempted),
             "model_name": llm.config.model_name,
-        }
-    )
-    emitter.emit(
-        Packet(
-            placement=Placement(turn_index=1),
-            obj=AgentResponseStart(
-                final_documents=docs,
-                pre_answer_processing_seconds=time.monotonic() - start,
-            ),
-        )
-    )
-    emitter.emit(
-        Packet(
-            placement=Placement(turn_index=1), obj=AgentResponseDelta(content=answer)
-        )
-    )
-    for number, doc in cited.items():
-        state.add_emitted_citation(number)
-        emitter.emit(
-            Packet(
-                placement=Placement(turn_index=1),
-                obj=CitationInfo(citation_number=number, document_id=doc.document_id),
-            )
-        )
-    logger.info(
-        "event=qedge_rag_answer persona=%s mode=%s documents=%s seconds=%.3f",
-        persona.id,
-        ("deep_summary" if requires_synthesis(question, force_deep) else "summary")
-        if generated
-        else "unavailable",
-        len(docs),
-        time.monotonic() - start,
+        },
     )

@@ -1,8 +1,11 @@
 import { DocumentInfoPacket, StreamStopInfo } from "@/lib/search/types";
 import type { SearchFiltersRequest } from "@/lib/searchFilters/types";
+import { mutate } from "swr";
 import { handleSSEStream } from "@/lib/search/streamingUtils";
+import { SWR_KEYS } from "@/lib/swr-keys";
+import type { PendingChatMessage } from "@/lib/chat/types";
 import { ReasoningEffortOverride } from "@/lib/languageModels/types";
-import { FeedbackType } from "@/app/app/interfaces";
+import { FeedbackType } from "@/app/app/types";
 import {
   BackendMessage,
   DocumentsResponse,
@@ -18,10 +21,9 @@ import {
   StreamingError,
   ToolCallMetadata,
   UserKnowledgeFilePacket,
-} from "../interfaces";
-import { ReadonlyURLSearchParams } from "next/navigation";
+} from "@/app/app/types";
 import { SEARCH_PARAM_NAMES } from "./searchParams";
-import { Packet } from "./streamingModels";
+import { Packet, StreamCursor } from "@/app/app/services/streamingModels";
 import type { ErrorResponseBody } from "@/lib/fetcher";
 import { isSessionEndedResponse } from "@/lib/auth/utils";
 import { revalidateCurrentUser } from "@/lib/users/svc";
@@ -178,8 +180,8 @@ export interface SendMessageParams {
   signal?: AbortSignal;
   deepResearch?: boolean;
   enabledToolIds?: number[];
-  // Single forced tool ID (new API uses singular, not array)
-  forcedToolId?: number | null;
+  // Preferred tool for this request; invocation is not guaranteed
+  preferredToolId?: number | null;
   // LLM override parameters
   modelProvider?: string;
   modelVersion?: string;
@@ -194,6 +196,8 @@ export interface SendMessageParams {
   additionalContext?: string;
 }
 
+export class ChatSendRejectedError extends Error {}
+
 export async function* sendMessage({
   message,
   fileDescriptors,
@@ -203,7 +207,7 @@ export async function* sendMessage({
   signal,
   deepResearch,
   enabledToolIds,
-  forcedToolId,
+  preferredToolId,
   modelProvider,
   modelVersion,
   modelConfigurationId,
@@ -221,7 +225,7 @@ export async function* sendMessage({
     internal_search_filters: filters,
     deep_research: deepResearch ?? false,
     allowed_tool_ids: enabledToolIds,
-    forced_tool_id: forcedToolId ?? null,
+    preferred_tool_id: preferredToolId ?? null,
     llm_override:
       temperature || modelVersion || modelConfigurationId != null
         ? {
@@ -236,6 +240,8 @@ export async function* sendMessage({
     // Default to "unknown" for consistency with backend; callers should set explicitly
     origin: origin ?? "unknown",
     additional_context: additionalContext ?? null,
+    // The web chat shows responses that background agents start later.
+    accepts_follow_ups: true,
   };
 
   const body = JSON.stringify(payload);
@@ -265,6 +271,7 @@ export async function* sendMessage({
         scope: data.scope,
         reset_at: data.reset_at,
         retry_after_seconds: data.retry_after_seconds,
+        model: data.model,
       };
       const streamingError: StreamingError = {
         error: data.detail ?? "You've reached your usage limit.",
@@ -282,10 +289,36 @@ export async function* sendMessage({
       void revalidateCurrentUser();
     }
 
-    throw new Error(data.detail ?? `HTTP error! status: ${response.status}`);
+    const message = data.detail ?? `HTTP error! status: ${response.status}`;
+    if (response.status < 500 && response.status !== 408) {
+      throw new ChatSendRejectedError(message);
+    }
+    throw new Error(message);
   }
 
-  yield* withoutHeartbeats(handleSSEStream<PacketType>(response, signal));
+  yield* withoutHeartbeats(
+    readChatStream<PacketType>(chatSessionId, response, signal)
+  );
+}
+
+// Both readers of a turn pass through here, so either one removes the pending
+// input a turn accepts.
+async function* readChatStream<T extends PacketType | StreamCursor>(
+  chatSessionId: string,
+  response: Response,
+  signal?: AbortSignal
+): AsyncGenerator<T, void, unknown> {
+  for await (const packet of handleSSEStream<T>(response, signal)) {
+    if ("obj" in packet && packet.obj.type === "user_message") {
+      const { id } = packet.obj;
+      void mutate<PendingChatMessage[]>(
+        SWR_KEYS.pendingChatMessages(chatSessionId),
+        (current) => current?.filter((message) => message.id !== id),
+        { revalidate: false }
+      );
+    }
+    yield packet;
+  }
 }
 
 // Drops keepalive heartbeats so stream consumers only ever see run state.
@@ -300,17 +333,15 @@ async function* withoutHeartbeats(
   }
 }
 
-// Replays an in-flight run's buffered stream from `cursor`, then tails it live.
-// 404 means there is nothing to resume — callers fall back to the persisted
-// session state. Heartbeats pass through: the consumer uses them as liveness
-// ticks to re-check session focus during quiet phases.
+// Cursors apply only to the named stream and its retained packet prefix.
 export async function* resumeStream(
   chatSessionId: string,
+  streamId: number,
   cursor: number,
   signal?: AbortSignal
-): AsyncGenerator<PacketType, void, unknown> {
+): AsyncGenerator<PacketType | StreamCursor, void, unknown> {
   const response = await fetch(
-    `/api/chat/chat-session/${chatSessionId}/resume-stream?cursor=${cursor}`,
+    `/api/chat/chat-session/${chatSessionId}/resume-stream?stream_id=${streamId}&cursor=${cursor}`,
     { signal }
   );
 
@@ -319,7 +350,11 @@ export async function* resumeStream(
     throw new Error(data.detail ?? `HTTP error! status: ${response.status}`);
   }
 
-  yield* handleSSEStream<PacketType>(response, signal);
+  yield* readChatStream<PacketType | StreamCursor>(
+    chatSessionId,
+    response,
+    signal
+  );
 }
 
 export async function setPreferredResponse(
@@ -484,10 +519,16 @@ export function processRawChatHistory(
       // all that matters is that the nodeId is unique for a given chat session
       nodeId: messageInfo.message_id,
       messageId: messageInfo.message_id,
+      responseStatus: messageInfo.response_status,
       message: messageInfo.message,
-      type: messageInfo.error
-        ? "error"
-        : (messageInfo.message_type as "user" | "assistant"),
+      errorMessage: messageInfo.error_info?.error ?? messageInfo.error,
+      errorCode: messageInfo.error_info?.error_code,
+      isRetryable: messageInfo.error_info?.is_retryable,
+      errorDetails: messageInfo.error_info?.details,
+      type:
+        messageInfo.error_info || messageInfo.error
+          ? "error"
+          : (messageInfo.message_type as Message["type"]),
       files: messageInfo.files,
       alternateAgentID:
         messageInfo.alternate_assistant_id !== null
@@ -556,7 +597,7 @@ const PARAMS_TO_SKIP = [
 ];
 
 export function buildChatUrl(
-  existingSearchParams: ReadonlyURLSearchParams | null,
+  existingSearchParams: URLSearchParams | null,
   chatSessionId: string | null,
   personaId: number | null,
   search?: boolean,
