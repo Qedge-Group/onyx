@@ -11,8 +11,8 @@ from onyx.agents.models import AgentState, PreparedStep, StepInput
 from onyx.agents.runtime import Agent, RestorableFeature
 from onyx.chat.knowledge_rag import (
     focus_query,
-    requires_synthesis,
     resolve_question,
+    summary_token_budget,
     synthesize_knowledge_answer,
 )
 from onyx.chat.models import ChatMessageMetadata, PersonaPromptConfig
@@ -104,9 +104,9 @@ class _KnowledgeGeneration(LLM):
             model_name=self.config.model_name,
             model_provider=self.config.model_provider,
             reasoning_effort=ReasoningEffort.OFF,
-            max_tokens=1800
-            if requires_synthesis(resolve_question(users), self.settings.force_deep)
-            else 750,
+            max_tokens=summary_token_budget(
+                resolve_question(users), self.settings.force_deep
+            ),
             sent_kwargs=answer.request_params,
         )
         return AssistantMessage(

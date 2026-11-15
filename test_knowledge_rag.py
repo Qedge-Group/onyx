@@ -124,6 +124,26 @@ class KnowledgeTests(unittest.TestCase):
             llm.invoke.call_args.args[0].system_prompt,
         )
 
+    def test_contextual_tasks_use_bounded_budgets_and_one_summary_call(self):
+        from onyx.chat.knowledge_rag import (
+            knowledge_task,
+            lexical_queries,
+            summary_token_budget,
+        )
+
+        self.assertEqual(knowledge_task("主要服务是什么？"), "answer")
+        self.assertEqual(knowledge_task("我想做开源方案，有案例吗？"), "qualified")
+        self.assertEqual(knowledge_task("比较 Sitecore 与 Drupal"), "analysis")
+        self.assertEqual(summary_token_budget("我想做开源方案"), 1100)
+        self.assertEqual(summary_token_budget("比较 Sitecore 与 Drupal"), 1800)
+        self.assertLessEqual(len(lexical_queries("比较 Sitecore 与 Drupal")), 4)
+        _, llm, _, _ = self.run_turn("主要服务是什么？")
+        self.assertEqual(llm.invoke.call_count, 1)
+        self.assertIn(
+            "exactly two concise, distinct follow-up questions",
+            llm.invoke.call_args.args[0].system_prompt,
+        )
+
     def test_answer_voice_and_identity_are_not_fixed_to_qedge(self):
         _, llm, _, _ = self.run_turn("Sitecore")
         system = llm.invoke.call_args.args[0].system_prompt
