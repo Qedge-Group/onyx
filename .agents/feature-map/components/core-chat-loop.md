@@ -524,3 +524,7 @@ See [[internal-search#qedge-grounded-retrieval]] for retrieval and scope checks.
   reload: the partial answer must stay. Send again, close the tab during the
   answer, and reopen the session: the answer must resume or show as saved. Run a
   multi-model turn and confirm that each column ends with its own answer or error.
+
+### QEdge contextual response flow
+
+The QEdge evidence-only route classifies direct answers, qualified requests, and analysis. It uses bounded output and evidence budgets with the same Flash model. Comparisons can add bounded keyword lanes. The same synthesis call appends two evidence-grounded questions under a localized Continue exploring heading. The Search adapter separates these from the answer for display as follow-up buttons.

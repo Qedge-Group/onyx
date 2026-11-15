@@ -91,7 +91,10 @@ _FOLLOWUP = re.compile(
     re.IGNORECASE,
 )
 _ALIASES = [
-    (r"主要服务|主要解决方案|核心解决方案|提供哪些|哪些服务", "services solutions capabilities"),
+    (
+        r"主要服务|主要解决方案|核心解决方案|提供哪些|哪些服务",
+        "services solutions capabilities",
+    ),
     (r"Sitecore", "Sitecore development implementation services"),
     (
         r"AI.{0,8}(?:内容管理|CMS)|(?:内容管理|CMS).{0,8}AI",
@@ -127,6 +130,26 @@ def knowledge_route_enabled(
 
 def requires_synthesis(question: str, force: bool = False) -> bool:
     return force or bool(_DEEP.search(question))
+
+
+def knowledge_task(
+    question: str, force: bool = False
+) -> Literal["answer", "qualified", "analysis"]:
+    if requires_synthesis(question, force):
+        return "analysis"
+    if re.search(
+        r"开源|预算|符合|适合|小团队|已有.{0,10}(?:系统|CMS)|open[ -]source|budget|small team|already use|requirements",
+        question,
+        re.IGNORECASE,
+    ):
+        return "qualified"
+    return "answer"
+
+
+def summary_token_budget(question: str, force: bool = False) -> int:
+    return {"answer": 750, "qualified": 1100, "analysis": 1800}[
+        knowledge_task(question, force)
+    ]
 
 
 def summary_model_override() -> LLMOverride | None:
@@ -195,7 +218,9 @@ def focus_query(question: str) -> str:
             if re.search(r"[\u4e00-\u9fff]", question)
             else "customer case studies"
         )
-    question = re.sub(r"^(?:请)?(?:了解|介绍|说说|讲讲)(?:一下)?\s*", "", question).strip()
+    question = re.sub(
+        r"^(?:请)?(?:了解|介绍|说说|讲讲)(?:一下)?\s*", "", question
+    ).strip()
     text = re.sub(
         r"根据(?:已收录的)?(?:官网|网站)?资料[，,：:]?|请(?:介绍|总结)|(?:并|，并)(?:附上来源|提供对应引用)|知识库中(?:已收录的)?",
         "",
@@ -245,7 +270,21 @@ def lexical_queries(question: str) -> list[str]:
     queries = [focus_query(question)]
     if terms:
         queries.append(" ".join(dict.fromkeys(terms)))
-    return list(dict.fromkeys(q for q in queries if q))
+    if re.search(r"比较|对比|compare|versus|\bvs\b", question, re.IGNORECASE):
+        comparison = re.sub(
+            r"^(?:请)?(?:比较|对比|compare)\s*",
+            "",
+            focus_query(question),
+            flags=re.IGNORECASE,
+        )
+        queries.extend(
+            part.strip()[:200]
+            for part in re.split(
+                r"与|和|versus|\bvs\.?\b", comparison, flags=re.IGNORECASE
+            )[:2]
+            if part.strip()
+        )
+    return list(dict.fromkeys(q for q in queries if q))[:4]
 
 
 def clean_text(text: str) -> str:
@@ -571,6 +610,8 @@ def synthesize_knowledge_answer(
     response_language: Literal["en", "zh"] | None = None,
     context: GenerationContext | None = None,
 ) -> KnowledgeAnswer:
+    task = knowledge_task(question, force_deep)
+    deep = task == "analysis"
     english = answer_language(current_question, response_language) == "en"
     synthesis_question = (
         (
@@ -621,12 +662,8 @@ def synthesize_knowledge_answer(
                     or excerpt(
                         item["content"],
                         question,
-                        limit=3200
-                        if requires_synthesis(question, force_deep)
-                        else 1400,
-                        max_passages=10
-                        if requires_synthesis(question, force_deep)
-                        else 4,
+                        limit=3200 if deep else (1800 if task == "qualified" else 1400),
+                        max_passages=10 if deep else (6 if task == "qualified" else 4),
                     ),
                 }
                 for item in available_evidence
@@ -642,7 +679,7 @@ def synthesize_knowledge_answer(
                 "Interpret conversational requests as topic questions, not exact page or section titles. For example, 了解核心解决方案 asks what the main solutions are; it does not ask whether a page has that name. Only discuss page existence when explicitly asked. Speak naturally and answer the topic directly. Do not open with retrieval narration such as 根据已收录资料 or 根据现有证据, and do not add a knowledge-base disclaimer when the relevant facts are supported. "
                 + (
                     "Give a grounded comparison or analysis, explaining limitations. "
-                    if requires_synthesis(question, force_deep)
+                    if deep
                     else "For a straightforward first answer, give a compact useful summary: about 150-280 Chinese characters or 80-150 English words, using less when sufficient. Keep examples relevant; leave further detail for follow-up questions. "
                 )
                 + (
@@ -654,12 +691,18 @@ def synthesize_knowledge_answer(
                     )
                     else "Lead with the most useful supported point. Let the structure and detail follow the question and evidence; avoid a stock opening. "
                 )
+                + (
+                    "Check every explicit requirement against the evidence before recommending a case or solution. Explain which conditions are supported and which remain unknown; ask one focused clarification when necessary. "
+                    if task == "qualified"
+                    else ""
+                )
                 + ("Respond in English. " if english else "使用简体中文。 ")
                 + "Identify the organization, brand, and products from the supplied evidence. Preserve their documented names. Adapt tone, perspective, terminology, and answer structure to the indexed material and selected Agent guidance. Infer those preferences from the supplied evidence; paraphrase in fresh language instead of copying its sentences. Use first-person plural only when the evidence clearly speaks for the organization; otherwise use neutral phrasing. Do not assume a QEdge identity or fixed brand voice. "
                 + (persona.system_prompt or "")
                 + "\n"
                 + (persona.task_prompt or "")
                 + "\nFinal format: a synthesized summary, never excerpts. Cite evidence using exactly [N], where N is the supplied document number. Do not invent numbers or sources."
+                + "\nAfter the answer, add exactly two concise, distinct follow-up questions grounded in these same documents: one for deeper understanding, one for a useful next decision. Each must name its topic so it can stand alone. Do not invent available cases, capabilities or facts, and do not attach citations to questions. Use a final heading ### Continue exploring for English or ### 继续了解 for Chinese, followed by two bullet questions."
                 + "\nThe response language rule takes precedence over conflicting Agent language preferences: "
                 + ("respond in English." if english else "仅使用简体中文回答。")
             )
@@ -684,16 +727,12 @@ def synthesize_knowledge_answer(
                         ],
                         options=GenerationOptions(
                             reasoning_effort=ReasoningEffort.OFF,
-                            max_tokens=1800
-                            if requires_synthesis(question, force_deep)
-                            else 750,
+                            max_tokens=summary_token_budget(question, force_deep),
                         ),
                     ),
                     context=(context or GenerationContext()).model_copy(
                         update={
-                            "total_timeout_s": 45
-                            if requires_synthesis(question, force_deep)
-                            else 30,
+                            "total_timeout_s": 45 if deep else 30,
                             "flow": LLMFlow.KNOWLEDGE_SYNTHESIS,
                         }
                     ),
@@ -703,9 +742,7 @@ def synthesize_knowledge_answer(
                     "event=qedge_rag_synthesis elapsed_ms=%s model=%s mode=%s",
                     round((time.perf_counter() - synthesis_started) * 1000),
                     llm.config.model_name,
-                    "deep_summary"
-                    if requires_synthesis(question, force_deep)
-                    else "summary",
+                    "deep_summary" if deep else "summary",
                 )
                 text = (result.text or "").strip()
                 text = re.sub(r"【(\d+)】", r"[\1]", text)
@@ -743,9 +780,7 @@ def synthesize_knowledge_answer(
                     "event=qedge_rag_synthesis elapsed_ms=%s model=%s mode=%s outcome=error",
                     round((time.perf_counter() - synthesis_started) * 1000),
                     llm.config.model_name,
-                    "deep_summary"
-                    if requires_synthesis(question, force_deep)
-                    else "summary",
+                    "deep_summary" if deep else "summary",
                 )
                 logger.warning(
                     "Knowledge synthesis unavailable: %s", llm.redact_error(str(exc))
@@ -766,12 +801,9 @@ def synthesize_knowledge_answer(
         citations=cited,
         usage=usage,
         request_params={
+            "qedge_task": task,
             "qedge_response_language": "en" if english else "zh",
-            "qedge_rag_mode": (
-                "deep_summary"
-                if requires_synthesis(question, force_deep)
-                else "summary"
-            )
+            "qedge_rag_mode": ("deep_summary" if deep else "summary")
             if generated
             else ("summary_unavailable" if attempted else "insufficient_evidence"),
             "generative_model_calls": int(attempted),
