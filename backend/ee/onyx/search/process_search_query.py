@@ -15,15 +15,19 @@ from ee.onyx.server.query_and_chat.streaming_models import (
     SearchErrorPacket,
     SearchQueriesPacket,
 )
+from onyx.context.search.content_policy import contains_excluded, filter_sections
 from onyx.context.search.models import BaseFilters, ChunkSearchRequest, InferenceChunk
 from onyx.context.search.pipeline import merge_individual_chunks, search_pipeline
 from onyx.db.models import User
 from onyx.db.search_settings import get_current_search_settings
 from onyx.document_index.factory import get_default_document_index
 from onyx.document_index.interfaces import DocumentIndex
+from onyx.error_handling.error_codes import OnyxErrorCode
+from onyx.error_handling.exceptions import OnyxError
 from onyx.llm.factory import get_default_llm, get_search_selection_llm
 from onyx.llm.interfaces import LLM
 from onyx.secondary_llm_flows.document_filter import select_sections_for_expansion
+from onyx.server.features.search.api import _load_persona
 from onyx.tools.tool_implementations.search.search_utils import (
     weighted_reciprocal_rank_fusion,
 )
@@ -84,6 +88,29 @@ def stream_search_query(
     Core search function that yields streaming packets.
     Used by both streaming and non-streaming endpoints.
     """
+    # The legacy Search UI API must honor the selected Agent's source scope.
+    if request.persona_id is not None:
+        _, info = _load_persona(request.persona_id, user, db_session)
+        configured = set(info.document_set_names)
+        selected = set(request.filters.document_set or []) if request.filters else set()
+        if configured and selected and not selected.issubset(configured):
+            raise OnyxError(
+                OnyxErrorCode.INSUFFICIENT_PERMISSIONS,
+                "Document set exceeds Agent scope",
+            )
+        if configured:
+            request = request.model_copy(
+                update={
+                    "filters": (request.filters or BaseFilters()).model_copy(
+                        update={"document_set": sorted(selected or configured)}
+                    )
+                }
+            )
+    policy_sets = request.filters.document_set or [] if request.filters else []
+    if contains_excluded(request.search_query, policy_sets):
+        yield SearchDocsPacket(search_docs=[])
+        return
+
     # Get document index.
     search_settings = get_current_search_settings(db_session)
     document_index = get_default_document_index(search_settings, None)
@@ -191,7 +218,7 @@ def stream_search_query(
             )
 
     # Merge chunks into sections
-    sections = merge_individual_chunks(chunks)
+    sections = filter_sections(merge_individual_chunks(chunks), policy_sets)
 
     # Truncate to the requested number of hits
     sections = sections[: request.num_hits]

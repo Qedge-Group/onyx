@@ -56,6 +56,7 @@ from onyx.configs.chat_configs import (
     SEARCH_MIN_SELECTED_SECTIONS,
 )
 from onyx.configs.constants import DocumentSource, FederatedConnectorSource, MessageType
+from onyx.context.search.content_policy import contains_excluded, filter_sections
 from onyx.context.search.federated.slack_search import slack_retrieval
 from onyx.context.search.models import (
     BaseFilters,
@@ -965,6 +966,37 @@ class SearchTool(Tool):
         scope_note: str,
         max_llm_chunks: int = MAX_CHUNKS_FED_TO_CHAT,
     ) -> ToolResult:
+        policy_sets = [
+            *(self.persona_search_info.document_set_names or []),
+            *(
+                self.user_selected_filters.document_set or []
+                if self.user_selected_filters
+                else []
+            ),
+        ]
+        if policy_sets:
+            clean_sections = filter_sections(sections_for_model, policy_sets)
+            blocked_ids = {s.center_chunk.document_id for s in sections_for_model} - {
+                s.center_chunk.document_id for s in clean_sections
+            }
+
+            def allowed(doc: SearchDoc) -> bool:
+                return doc.document_id not in blocked_ids and not contains_excluded(
+                    "\n".join(
+                        (
+                            doc.document_id,
+                            doc.semantic_identifier or "",
+                            doc.blurb or "",
+                        )
+                    ),
+                    policy_sets,
+                )
+
+            search_docs = [doc for doc in search_docs if allowed(doc)]
+            if displayed_docs is not None:
+                displayed_docs = [doc for doc in displayed_docs if allowed(doc)]
+            sections_for_model = clean_sections
+
         docs_str, citation_mapping = convert_inference_sections_to_llm_string(
             top_sections=sections_for_model,
             citation_start=citation_start,
@@ -1024,6 +1056,19 @@ class SearchTool(Tool):
     ) -> ToolResult:
         """Retrieve documents using the original question and optional query variants."""
         grounded = context.grounded_fast_mode
+        policy_sets = [
+            *(self.persona_search_info.document_set_names or []),
+            *(
+                self.user_selected_filters.document_set or []
+                if self.user_selected_filters
+                else []
+            ),
+        ]
+        if contains_excluded(original_query, policy_sets):
+            return ToolResult(
+                content='{"results": []}',
+                details=SearchDocsResponse(search_docs=[], citation_mapping={}),
+            )
         if grounded:
             configured = set(self.persona_search_info.document_set_names or [])
             selected_sets = (
@@ -1481,7 +1526,7 @@ class SearchTool(Tool):
                 ]
         # We can disregard all of the chunks that exceed the num_hits parameter since it's not valid to have
         # documents/contents from things that aren't returned to the user on the frontend
-        all_sections = merge_individual_chunks(top_chunks)
+        all_sections = filter_sections(merge_individual_chunks(top_chunks), policy_sets)
         top_sections = all_sections[:NUM_RETURNED_HITS]
 
         if not top_sections:
@@ -1770,7 +1815,9 @@ class SearchTool(Tool):
 
         # Merge sections from the same document that have adjacent or overlapping chunks
         # This prevents duplicate content and reduces token usage
-        merged_sections = merge_overlapping_sections(expanded_sections)
+        merged_sections = filter_sections(
+            merge_overlapping_sections(expanded_sections), policy_sets
+        )
 
         result = self._build_search_result(
             sections_for_model=merged_sections,

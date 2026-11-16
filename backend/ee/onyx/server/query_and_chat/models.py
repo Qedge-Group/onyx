@@ -29,6 +29,7 @@ class SearchFlowClassificationResponse(BaseModel):
 # It is very important to 1. avoid bloat and 2. that this remains backwards
 # compatible across versions.
 class SendSearchQueryRequest(BaseModel):
+    persona_id: int | None = None
     search_query: str
     filters: BaseFilters | None = None
     num_docs_fed_to_llm_selection: int | None = None

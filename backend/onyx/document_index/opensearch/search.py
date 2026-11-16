@@ -9,6 +9,7 @@ from onyx.configs.app_configs import (
     OPENSEARCH_PROFILING_DISABLED,
 )
 from onyx.configs.constants import INDEX_SEPARATOR, DocumentSource
+from onyx.context.search.content_policy import excluded_terms
 from onyx.context.search.models import (
     CCPairAccessFilter,
     CCPairAccessMode,
@@ -1628,6 +1629,20 @@ class DocumentQuery:
                     filter_clauses.append(
                         _get_restricted_cc_pair_guard(restricted_cc_pair_guard)
                     )
+
+        policy_terms = excluded_terms([*document_sets, *(forced_document_sets or [])])
+        if policy_terms:
+            filter_clauses.append(
+                {
+                    "bool": {
+                        "must_not": [
+                            {"match_phrase": {field: term}}
+                            for term in policy_terms
+                            for field in (TITLE_FIELD_NAME, CONTENT_FIELD_NAME)
+                        ]
+                    }
+                }
+            )
 
         if forced_document_sets:
             # Its own top-level AND clause (not merged into the OR-based
