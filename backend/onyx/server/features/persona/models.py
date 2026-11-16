@@ -414,6 +414,9 @@ class PersonaSnapshot(BaseModel):
 # Model with full context on persona's internal settings
 # This is used for flows which need to know all settings
 class FullPersonaSnapshot(PersonaSnapshot):
+    # Read-only integration behavior; never expose internal prompts via widget metadata.
+    knowledge_mode: bool = False
+    knowledge_model_override: bool = False
     search_start_date: datetime | None = None
     # Per-requesting-user context, set by the single-persona endpoint
     user_permission: PersonaAccessLevel | None = None

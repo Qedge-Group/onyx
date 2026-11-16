@@ -299,3 +299,7 @@ read. `seed_pinned_personas_from_featured` runs once, at account creation.
 - By hand: share an agent as viewer with a second user who lacks access to one
   of its document sets. The agent must appear in their list, and a search must
   not return the hidden documents.
+
+## QEdge widget configuration
+
+`GET /persona/{id}` adds read-only `knowledge_mode` and `knowledge_model_override` flags for the QEdge integration. The read gate and model access filtering stay unchanged. The Search service projects starter labels/messages and effective behavior; it must not expose prompt text through its widget metadata endpoint. Production widgets load the selected Agent's starters, retain an empty list, and cancel stale scope loads. The Demo form explains question-language, site-model, evidence and date behavior. The backed-up repair command aligns stored language guidance and completes the known incomplete CN citation rule without changing starter messages or knowledge bindings.
