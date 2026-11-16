@@ -756,6 +756,12 @@ def get_persona(
         ) from e
 
     snapshot = FullPersonaSnapshot.from_model(persona)
+    from onyx.chat.knowledge_rag import enabled, summary_model_override
+
+    snapshot.knowledge_mode = enabled(persona.id)
+    snapshot.knowledge_model_override = (
+        snapshot.knowledge_mode and summary_model_override() is not None
+    )
     # Hide a pinned model this viewer cannot use. The check is viewer-relative, so
     # it changes only the response, never the stored agent.
     if persona.default_model_configuration_id:

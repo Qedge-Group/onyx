@@ -6,3 +6,13 @@ openapi: "GET /persona/{persona_id}"
 <Info>
   **Required permission:** none beyond authentication.
 </Info>
+
+## QEdge integration fields
+
+QEdge deployments add two read-only fields:
+
+- `knowledge_mode`: this Agent uses the configured knowledge-only route for eligible chat requests.
+- `knowledge_model_override`: that route uses a site-level summary model override.
+
+Both fields default to `false`. They do not change Agent access or document permissions.
+They do not select the route for requests with files or other settings that require standard chat.
