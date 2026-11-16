@@ -528,3 +528,5 @@ See [[internal-search#qedge-grounded-retrieval]] for retrieval and scope checks.
 ### QEdge contextual response flow
 
 The QEdge evidence-only route classifies direct answers, qualified requests, and analysis. It uses bounded output and evidence budgets with the same Flash model. Comparisons can add bounded keyword lanes. The same synthesis call appends two evidence-grounded questions under a localized Continue exploring heading. The Search adapter separates these from the answer for display as follow-up buttons.
+
+QEdge CN knowledge boundary (2026-11-16): `onyx/context/search/content_policy.py` owns exclusions for `www.qedge.cn`. OpenSearch applies title/content exclusions before ranking; SearchTool rejects excluded topics and filters merged/expanded evidence and returned sources. The legacy Search UI API now accepts and validates persona_id and intersects caller document sets with the Agent's configured sets. Raw indexed history remains intact; these are logical retrieval boundaries, not deletion or renamed legacy products.

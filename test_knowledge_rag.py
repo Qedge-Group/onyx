@@ -177,6 +177,8 @@ class KnowledgeTests(unittest.TestCase):
         deep=False,
         response=None,
         filters=None,
+        instructions="",
+        reminders="",
     ):
         d = doc()
         tool = MagicMock(name="internal_search")
@@ -218,8 +220,8 @@ class KnowledgeTests(unittest.TestCase):
             current_question=resolve_question([message(question)]),
             response=tool.run.return_value,
             persona=PersonaPromptConfig(
-                system_prompt="",
-                task_prompt="",
+                system_prompt=instructions,
+                task_prompt=reminders,
                 datetime_aware=False,
                 replace_base_system_prompt=False,
             ),
@@ -329,6 +331,14 @@ class KnowledgeTests(unittest.TestCase):
             self.assertFalse(requires_synthesis(q))
         self.assertTrue(requires_synthesis("比较 Sitecore 与 Sitefinity 的实施差异"))
         self.assertTrue(requires_synthesis("Compare both implementation strategies"))
+
+    def test_agent_instructions_and_reminders_are_injected(self):
+        _, llm, _, _ = self.run_turn(
+            instructions="INSTRUCTIONS_MARKER", reminders="REMINDERS_MARKER"
+        )
+        system = llm.invoke.call_args.args[0].system_prompt
+        self.assertIn("INSTRUCTIONS_MARKER", system)
+        self.assertIn("REMINDERS_MARKER", system)
 
     def test_simple_answer_uses_one_grounded_summary(self):
         state, llm, tool, emitter = self.run_turn()
