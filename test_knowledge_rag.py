@@ -689,6 +689,48 @@ class KnowledgeTests(unittest.TestCase):
             self.assertEqual(rank_sections([article, project], "你们的案例"), [project])
             self.assertEqual(rank_sections([article], "你们的案例"), [])
 
+    def test_named_case_prefers_client_detail_and_keeps_queries_scoped(self):
+        from onyx.chat.knowledge_rag import lexical_queries, named_case_subject
+
+        def section(path, title, content):
+            return NS(
+                center_chunk=NS(
+                    document_id=f"https://www.qedge.cn/{path}",
+                    semantic_identifier=title,
+                    content=content,
+                    score=0,
+                    chunk_id=0,
+                ),
+                combined_content=content,
+            )
+
+        project = section(
+            "project/lyyl/",
+            "医疗健康行业企业出海解决方案",
+            "项目背景：上海联影医疗建设全球官网站群。",
+        )
+        other = section("project/other/", "其他项目", "企业官网建设")
+        article = section("sitecore/", "Sitecore 技术文章", "联影案例的行业趋势")
+        page = section("projects/", "案例列表", "联影医疗")
+        for question, subject in [
+            ("介绍一下联影案例", "联影"),
+            ("联影医疗的项目案例", "联影医疗"),
+        ]:
+            with self.subTest(question=question):
+                self.assertEqual(named_case_subject(question), subject)
+                self.assertIn(subject, lexical_queries(question))
+                self.assertEqual(
+                    rank_sections([article, other, page, project], question),
+                    [project],
+                )
+        for question in (
+            "你们的案例",
+            "开源案例",
+            "介绍一下联影案例的技术架构",
+            "有哪些医疗行业的案例？",
+        ):
+            self.assertIsNone(named_case_subject(question))
+
     def test_navigation_is_not_used_as_case_evidence(self):
         from onyx.chat.knowledge_rag import excerpt
 

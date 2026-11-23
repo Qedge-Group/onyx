@@ -323,6 +323,60 @@ def is_case_overview(question: str) -> bool:
     return not re.search(r"[A-Za-z0-9\u4e00-\u9fff]", residue)
 
 
+_NAMED_CASE_CN = re.compile(
+    r"(?:(?:请)?(?:介绍|了解|说说|讲讲|看看|看)(?:一下)?\s*)?"
+    r"(?P<name>[\w &.-]{2,30}?)\s*(?:的)?(?:客户|项目|成功)?案例(?:呢|吗)?"
+)
+_NAMED_CASE_EN = re.compile(
+    r"(?:(?:please )?(?:tell me about|show me|describe) (?:the )?)?"
+    r"(?P<name>[a-z0-9][a-z0-9 &.'-]{1,49}?)(?:'s)? case study",
+    re.IGNORECASE,
+)
+_GENERIC_CASE_SUBJECTS = {
+    "开源",
+    "企业",
+    "医疗",
+    "汽车",
+    "技术",
+    "实施",
+    "企业出海",
+    "数字化转型",
+    "sitecore",
+    "cms",
+    "ai",
+    "open source",
+    "healthcare",
+    "ecommerce",
+    "digital transformation",
+}
+
+
+def named_case_subject(question: str) -> str | None:
+    text = question.strip().rstrip("。？！?.!").strip()
+    if knowledge_task(text) != "answer" or is_case_overview(text):
+        return None
+    match = _NAMED_CASE_CN.fullmatch(text) or _NAMED_CASE_EN.fullmatch(text)
+    if not match:
+        return None
+    subject = match["name"].strip()
+    if subject.casefold() in _GENERIC_CASE_SUBJECTS or re.search(
+        r"^(?:有|哪些|找|帮我|想)|行业$|方案$|相关$|类型$|案例", subject
+    ):
+        return None
+    return subject
+
+
+def _name_matches_case_chunk(chunk: InferenceChunk, subject: str) -> bool:
+    path = urlsplit(chunk.document_id).path.lower().strip("/").split("/")
+    if len(path) < 2 or path[0] not in CASE_PAGE_SLUGS:
+        return False
+    text = (chunk.semantic_identifier + "\n" + chunk.content[:2000]).casefold()
+    subject = subject.casefold()
+    if re.search(r"[\u4e00-\u9fff]", subject):
+        return subject in text
+    return re.search(r"(?<!\w)" + re.escape(subject) + r"(?!\w)", text) is not None
+
+
 def focus_query(question: str) -> str:
     if is_case_overview(question):
         return (
@@ -360,6 +414,8 @@ def focus_query(question: str) -> str:
 
 
 def lexical_queries(question: str) -> list[str]:
+    if subject := named_case_subject(question):
+        return [focus_query(question), subject]
     if is_contact_lookup(question):
         return [
             focus_query(question),
@@ -440,7 +496,7 @@ def diversify_sections(
 
 
 def indexed_case_chunks(
-    document_index: DocumentIndex, filters: IndexFilters
+    document_index: DocumentIndex, filters: IndexFilters, subject: str | None = None
 ) -> list[InferenceChunk]:
     if not filters.document_set:
         return []
@@ -449,10 +505,18 @@ def indexed_case_chunks(
         return []
     # Metadata lookup locates indexed candidates; actual content is obtained
     # only through the normal index ACL and document-set filters.
-    return document_index.id_based_retrieval(
-        chunk_requests=[DocumentSectionRequest(document_id=id) for id in ids],
+    chunks = document_index.id_based_retrieval(
+        chunk_requests=[
+            DocumentSectionRequest(
+                document_id=id, max_chunk_ind=3 if subject else None
+            )
+            for id in ids
+        ],
         filters=filters,
     )
+    if subject:
+        return [chunk for chunk in chunks if _name_matches_case_chunk(chunk, subject)]
+    return chunks
 
 
 def indexed_contact_chunks(
@@ -501,6 +565,16 @@ def rank_sections(
     question = focus_query(question)
     if not candidates:
         return []
+    if subject := named_case_subject(question):
+        named_pages = [
+            section
+            for section in candidates
+            if _name_matches_case_chunk(section.center_chunk, subject)
+        ]
+        if named_pages:
+            for section in named_pages:
+                section.center_chunk.score = 1.0
+            return named_pages[:4]
     if is_case_overview(question):
         case_pages = [
             s
@@ -769,6 +843,7 @@ def synthesize_knowledge_answer(
 ) -> KnowledgeAnswer:
     contact_lookup = is_contact_lookup(question)
     case_overview = is_case_overview(question)
+    named_case = named_case_subject(current_question)
     task = knowledge_task(question, force_deep)
     deep = task == "analysis"
     english = answer_language(current_question, response_language) == "en"
@@ -887,6 +962,12 @@ def synthesize_knowledge_answer(
                     "product vendor's example, or an industry article does not prove "
                     "project delivery. Preserve any client anonymity in the source."
                     if case_overview else ""
+                )
+                + (
+                    "\nExplain the named customer's project. Prefer its official project "
+                    "detail when present. Describe the need, work delivered, and supported "
+                    "outcome briefly. An article mentioning the customer is only partial evidence."
+                    if named_case else ""
                 )
                 + "\nFinal format: a synthesized summary, never excerpts. Cite evidence using exactly [N], where N is the supplied document number. Do not invent numbers or sources."
                 + (
