@@ -160,6 +160,8 @@ class KnowledgeTests(unittest.TestCase):
         with patch("onyx.chat.knowledge_rag.get_rerank_credentials", return_value=None):
             self.assertEqual(rank_sections([article, contact], "联系方式"), [contact])
             self.assertEqual(rank_sections([article], "联系方式"), [])
+        localized = section("jp/contact/", "Contact", "Email info@example.com")
+        self.assertEqual(rank_sections([localized, contact], "联系方式"), [contact])
         snippets = excerpt(contact.combined_content, "联系方式", max_passages=4)
         self.assertIn("400-0000-000", snippets)
         self.assertIn("info@example.com", snippets)
