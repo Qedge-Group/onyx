@@ -26,6 +26,7 @@ from onyx.context.search.models import (
     SearchDocsResponse,
 )
 from onyx.db.knowledge_rag import (
+    CASE_PAGE_SLUGS,
     get_indexed_case_document_ids,
     get_indexed_contact_document_ids,
     get_rerank_credentials,
@@ -243,7 +244,25 @@ def resolve_question(history: Sequence[Message]) -> str:
     return current
 
 
+_CASE_OVERVIEW_CN = re.compile(
+    r"(?:请|想)?(?:介绍一下|介绍|看看|看一下|了解一下|了解|列举|总结)?\s*"
+    r"(?:(?:你们|贵司|贵公司|QEdge|睿哲信息|官网)\s*的?\s*)?"
+    r"(?:有(?:哪些|什么|没有)?|做过(?:哪些|什么)?)?\s*"
+    r"(?:客户案例|项目案例|成功案例|案例|项目)"
+    r"(?:有哪些|有什么|吗|呢)?",
+    re.IGNORECASE,
+)
+_CASE_OVERVIEW_EN = re.compile(
+    r"(?:(?:please )?(?:show me|tell me about|summarize|list) |what are )?"
+    r"(?:(?:your|our|qedge(?:'s)?) )?(?:customer |client )?(?:case studies|portfolio)",
+    re.IGNORECASE,
+)
+
+
 def is_case_overview(question: str) -> bool:
+    text = question.strip().rstrip("。？！?.!").strip()
+    if _CASE_OVERVIEW_CN.fullmatch(text) or _CASE_OVERVIEW_EN.fullmatch(text):
+        return True
     if not re.search(r"客户案例|case studies", question, re.IGNORECASE):
         return False
     residue = re.sub(
@@ -368,7 +387,9 @@ def diversify_sections(
 def indexed_case_chunks(
     document_index: DocumentIndex, filters: IndexFilters
 ) -> list[InferenceChunk]:
-    ids = get_indexed_case_document_ids()
+    if not filters.document_set:
+        return []
+    ids = get_indexed_case_document_ids(filters.document_set)
     if not ids:
         return []
     # Metadata lookup locates indexed candidates; actual content is obtained
@@ -429,10 +450,8 @@ def rank_sections(
         case_pages = [
             s
             for s in candidates
-            if re.search(
-                r"^/(?:portfolios|projects)(?:/|$)",
-                urlsplit(s.center_chunk.document_id).path,
-            )
+            if urlsplit(s.center_chunk.document_id).path.lower().lstrip("/").split("/", 1)[0]
+            in CASE_PAGE_SLUGS
         ]
         if case_pages:
             case_pages.sort(
@@ -449,6 +468,7 @@ def rank_sections(
                 min(8, len(case_pages)),
             )
             return case_pages[:8]
+        return []
     texts = [
         clean_text(
             s.center_chunk.semantic_identifier
@@ -693,6 +713,7 @@ def synthesize_knowledge_answer(
     context: GenerationContext | None = None,
 ) -> KnowledgeAnswer:
     contact_lookup = is_contact_lookup(question)
+    case_overview = is_case_overview(question)
     task = knowledge_task(question, force_deep)
     deep = task == "analysis"
     english = answer_language(current_question, response_language) == "en"
@@ -744,7 +765,7 @@ def synthesize_knowledge_answer(
                     "title": item["title"],
                     "content": (
                         catalog_excerpt(item["content"])
-                        if is_case_overview(question)
+                        if case_overview
                         else None
                     )
                     or excerpt(
@@ -791,6 +812,14 @@ def synthesize_knowledge_answer(
                 + (persona.system_prompt or "")
                 + "\n"
                 + (persona.task_prompt or "")
+                + (
+                    "\nGive two to four concrete examples of work delivered by this "
+                    "organization, or fewer when evidence is limited. Cite each project. "
+                    "Say what the organization did in each example. A client logo, a "
+                    "product vendor's example, or an industry article does not prove "
+                    "project delivery. Preserve any client anonymity in the source."
+                    if case_overview else ""
+                )
                 + "\nFinal format: a synthesized summary, never excerpts. Cite evidence using exactly [N], where N is the supplied document number. Do not invent numbers or sources."
                 + (
                     "\nDo not add suggested follow-up questions. Keep the answer to "

@@ -556,6 +556,17 @@ class KnowledgeTests(unittest.TestCase):
                 "Summarise the customer case studies available in the knowledge base and cite your sources."
             )
         )
+        for query in (
+            "你们的案例",
+            "你们有哪些案例？",
+            "看看你们的项目案例",
+            "案例",
+            "你们做过哪些项目",
+            "Show me your case studies",
+        ):
+            with self.subTest(query=query):
+                self.assertTrue(is_case_overview(query))
+        self.assertFalse(is_case_overview("你们有哪些开源 CMS 案例？"))
         self.assertFalse(is_case_overview("请总结医疗行业的客户案例"))
         self.assertIn("医疗", focus_query("请总结医疗行业的客户案例"))
         query = focus_query("请介绍官网中与企业搜索和内容发现相关的解决方案。")
@@ -584,14 +595,34 @@ class KnowledgeTests(unittest.TestCase):
         "onyx.chat.knowledge_rag.get_indexed_case_document_ids",
         return_value=["https://www.qedge.ai/portfolios"],
     )
-    def test_case_catalog_content_uses_index_acl(self, _session):
+    def test_case_catalog_content_uses_index_acl(self, case_ids):
         from onyx.chat.knowledge_rag import indexed_case_chunks
 
         index = MagicMock()
         index.id_based_retrieval.return_value = []
         filters = NS(document_set=["www.qedge.cn"], access_control_list=["test-user"])
         self.assertEqual(indexed_case_chunks(index, filters), [])
+        case_ids.assert_called_once_with(["www.qedge.cn"])
         self.assertIs(index.id_based_retrieval.call_args.kwargs["filters"], filters)
+
+    def test_short_case_overview_selects_chinese_project_pages(self):
+        def section(path, content):
+            return NS(
+                center_chunk=NS(
+                    document_id=f"https://www.qedge.cn/{path}",
+                    semantic_identifier=path,
+                    content=content,
+                    score=0,
+                    chunk_id=0,
+                ),
+                combined_content=content,
+            )
+
+        article = section("sitecore-cdp/", "阿联酋航空使用 Sitecore CDP。")
+        project = section("project/client-a/", "我们协助客户完成官网升级。")
+        with patch("onyx.chat.knowledge_rag.get_rerank_credentials", return_value=None):
+            self.assertEqual(rank_sections([article, project], "你们的案例"), [project])
+            self.assertEqual(rank_sections([article], "你们的案例"), [])
 
     def test_navigation_is_not_used_as_case_evidence(self):
         from onyx.chat.knowledge_rag import excerpt

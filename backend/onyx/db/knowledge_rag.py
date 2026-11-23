@@ -28,31 +28,33 @@ def get_rerank_credentials() -> tuple[str, str] | None:
     return None
 
 
-def get_indexed_case_document_ids() -> list[str]:
-    with get_session_with_current_tenant() as session:
-        statement = (
-            select(Document.id)
-            .where(
-                or_(
-                    Document.id.like("%/portfolios%"),
-                    Document.id.like("%/projects%"),
-                )
-            )
-            .order_by(Document.id)
-            .limit(48)
-        )
-        return list(session.scalars(statement).all())
+CASE_PAGE_SLUGS = ("project", "projects", "portfolio", "portfolios", "case-studies")
+
+
+def get_indexed_case_document_ids(document_sets: list[str]) -> list[str]:
+    paths = [
+        pattern
+        for slug in CASE_PAGE_SLUGS
+        for pattern in (f"%/{slug}", f"%/{slug}/%")
+    ]
+    return _indexed_site_document_ids(document_sets, paths, limit=48)
 
 
 def get_indexed_contact_document_ids(document_sets: list[str]) -> list[str]:
-    membership = DocumentSet__ConnectorCredentialPair
-    indexed = DocumentByConnectorCredentialPair
-    pair = ConnectorCredentialPair
-    contact_paths = [
-        Document.id.ilike("%/" + slug + suffix)
+    paths = [
+        "%/" + slug + suffix
         for slug in ("contact", "contact-us", "contactus")
         for suffix in ("", "/")
     ]
+    return _indexed_site_document_ids(document_sets, paths, limit=12)
+
+
+def _indexed_site_document_ids(
+    document_sets: list[str], paths: list[str], *, limit: int
+) -> list[str]:
+    membership = DocumentSet__ConnectorCredentialPair
+    indexed = DocumentByConnectorCredentialPair
+    pair = ConnectorCredentialPair
     with get_session_with_current_tenant() as session:
         statement = (
             select(Document.id)
@@ -70,10 +72,10 @@ def get_indexed_contact_document_ids(document_sets: list[str]) -> list[str]:
                 DocumentSet.name.in_(document_sets),
                 membership.is_current.is_(True),
                 indexed.has_been_indexed.is_(True),
-                or_(*contact_paths),
+                or_(*(Document.id.ilike(path) for path in paths)),
             )
             .distinct()
             .order_by(Document.id)
-            .limit(12)
+            .limit(limit)
         )
         return list(session.scalars(statement).all())
