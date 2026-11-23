@@ -140,9 +140,44 @@ class KnowledgeTests(unittest.TestCase):
         _, llm, _, _ = self.run_turn("主要服务是什么？")
         self.assertEqual(llm.invoke.call_count, 1)
         self.assertIn(
-            "exactly two concise, distinct follow-up questions",
+            "add up to two distinct follow-up questions",
             llm.invoke.call_args.args[0].system_prompt,
         )
+
+    def test_contact_lookup_prefers_official_page_and_preserves_short_fields(self):
+        from onyx.chat.knowledge_rag import excerpt
+
+        def section(path, title, content):
+            return NS(
+                center_chunk=NS(document_id="https://www.qedge.cn/" + path,
+                                semantic_identifier=title, content=content, score=0, chunk_id=0),
+                combined_content=content,
+            )
+
+        article = section("web-design/", "网站设计", "汽车网站应提供联系方式和联系电话。")
+        contact = section("contact-us/", "联系我们",
+                          "菜单内容和与联系方式无关的标题都不应优先选取。\n电话\n400-0000-000\n邮箱\ninfo@example.com\n上海\n静安区测试路1号")
+        with patch("onyx.chat.knowledge_rag.get_rerank_credentials", return_value=None):
+            self.assertEqual(rank_sections([article, contact], "联系方式"), [contact])
+            self.assertEqual(rank_sections([article], "联系方式"), [])
+        snippets = excerpt(contact.combined_content, "联系方式", max_passages=4)
+        self.assertIn("400-0000-000", snippets)
+        self.assertIn("info@example.com", snippets)
+
+    def test_contact_lookup_does_not_treat_design_questions_as_contact_requests(self):
+        from onyx.chat.knowledge_rag import lexical_queries
+
+        self.assertIn("联系我们 联系电话 电子邮箱 办公地址", lexical_queries("QEdge的邮箱？"))
+        self.assertNotIn("联系我们 联系电话 电子邮箱 办公地址", lexical_queries("怎么设计网站的联系方式？"))
+        self.assertNotIn("联系我们 联系电话 电子邮箱 办公地址", lexical_queries("Sitecore 的客服邮箱？"))
+
+    def test_contact_summary_omits_unrequested_suggestions(self):
+        answer, llm, _, _ = self.run_turn(
+            "联系方式", response="电话 400-0000-000。[1]\n\n### 继续了解\n- 无关追问"
+        )
+        self.assertIn("400-0000-000", answer.answer)
+        self.assertNotIn("无关追问", answer.answer)
+        self.assertIn("Do not add suggested follow-up questions", llm.invoke.call_args.args[0].system_prompt)
 
     def test_answer_voice_and_identity_are_not_fixed_to_qedge(self):
         _, llm, _, _ = self.run_turn("Sitecore")
