@@ -25,7 +25,11 @@ from onyx.context.search.models import (
     SearchDoc,
     SearchDocsResponse,
 )
-from onyx.db.knowledge_rag import get_indexed_case_document_ids, get_rerank_credentials
+from onyx.db.knowledge_rag import (
+    get_indexed_case_document_ids,
+    get_indexed_contact_document_ids,
+    get_rerank_credentials,
+)
 from onyx.document_index.interfaces import DocumentIndex, DocumentSectionRequest
 from onyx.error_handling.error_codes import OnyxErrorCode
 from onyx.error_handling.exceptions import OnyxError
@@ -104,6 +108,46 @@ _ALIASES = [
     (r"客户案例|案例|case studies", "customer case studies success stories"),
     (r"企业搜索|内容发现", "enterprise search content discovery"),
 ]
+
+
+_CONTACT_PATH = re.compile(r"/(?:contact(?:-us)?|contactus)/?$", re.IGNORECASE)
+_CONTACT_CN = re.compile(
+    r"(?:请问|请告诉我|想了解|我想知道)?\s*"
+    r"(?:(?:QEdge|睿哲信息|你们|贵司|贵公司|公司|官网)\s*的?\s*)?"
+    r"(?:(?:如何|怎么|怎样)(?:联系|找到)(?:\s*(?:QEdge|睿哲信息|你们|贵司|贵公司))?"
+    r"|(?:(?:上海|北京|广州|青岛|香港|新加坡|悉尼|中国|海外)?(?:总部|办公室|办公|客服|联系|商务|咨询)?)"
+    r"(?:联系方式|电话|热线|邮箱|电子邮件|地址|在哪里|在哪|联系我们)"
+    r"(?:\s*(?:和|及|、)\s*(?:电话|邮箱|地址))?"
+    r"(?:是什么|是多少|是哪里|在哪里|在哪|在哪儿|多少)?)(?:吗)?",
+    re.IGNORECASE,
+)
+_CONTACT_EN = re.compile(
+    r"(?:(?:how (?:can|do) i (?:contact|reach)|contact) (?:you|qedge)"
+    r"|(?:(?:what|where) (?:is|are) )?(?:(?:your|qedge(?:'s)?) )?"
+    r"(?:contact(?: details| information| us)?|(?:office )?address|phone(?: number)?|e-?mail(?: address)?))",
+    re.IGNORECASE,
+)
+_CONTACT_FIELD = re.compile(
+    r"电话|邮箱|地址|总部|办公室|上海|北京|广州|青岛|香港|新加坡|悉尼|荷兰|"
+    r"\b(?:office|headquarters|address|phone|email|tel|suite|level|street|road)\b|"
+    r"[\w.+-]+@[\w.-]+\.[a-z]{2,}|\+?\d[\d ()-]{6,}\d",
+    re.IGNORECASE,
+)
+
+
+def is_contact_lookup(question: str) -> bool:
+    text = question.strip().rstrip("？?。.!！").strip()
+    return bool(_CONTACT_CN.fullmatch(text) or _CONTACT_EN.fullmatch(text))
+
+
+def _contact_excerpt(text: str, limit: int) -> str:
+    lines = [line.strip() for line in clean_text(text).splitlines() if line.strip()]
+    matched = {i for i, line in enumerate(lines) if _CONTACT_FIELD.search(line)}
+    # A short label and its value are frequently on separate lines.
+    indexes = matched | {
+        i + 1 for i in matched if i + 1 < len(lines) and len(lines[i]) <= 32
+    }
+    return "\n".join(dict.fromkeys(lines[i] for i in sorted(indexes)))[:limit]
 
 
 def enabled(persona_id: int) -> bool:
@@ -248,6 +292,12 @@ def focus_query(question: str) -> str:
 
 
 def lexical_queries(question: str) -> list[str]:
+    if is_contact_lookup(question):
+        return [
+            focus_query(question),
+            "联系我们 联系电话 电子邮箱 办公地址",
+            "contact us phone email office address",
+        ]
     if re.search(r"开源|open[ -]source", question, re.IGNORECASE):
         return [focus_query(question), "开源", "open source CMS"]
     if _ENTITY_ONLY.fullmatch(question):
@@ -329,9 +379,33 @@ def indexed_case_chunks(
     )
 
 
+def indexed_contact_chunks(
+    document_index: DocumentIndex, filters: IndexFilters
+) -> list[InferenceChunk]:
+    if not filters.document_set:
+        return []
+    ids = get_indexed_contact_document_ids(filters.document_set)
+    if not ids:
+        return []
+    return document_index.id_based_retrieval(
+        chunk_requests=[DocumentSectionRequest(document_id=id) for id in ids],
+        filters=filters,
+    )
+
+
 def rank_sections(
     sections: list[InferenceSection], question: str
 ) -> list[InferenceSection]:
+    if is_contact_lookup(question):
+        contact_sections = [
+            section
+            for section in sections
+            if _CONTACT_PATH.search(urlsplit(section.center_chunk.document_id).path)
+            and _contact_excerpt(section.combined_content, limit=1400)
+        ]
+        for section in contact_sections:
+            section.center_chunk.score = 1.0
+        return contact_sections[:4]
     started = time.perf_counter()
     rerank_elapsed_ms = 0
     rerank_cache_status = "unused"
@@ -541,6 +615,8 @@ def catalog_excerpt(text: str) -> str | None:
 def excerpt(
     text: str, question: str, limit: int = 580, max_passages: int | None = None
 ) -> str:
+    if is_contact_lookup(question):
+        return _contact_excerpt(text, limit)
     text = clean_text(text)
     question = focus_query(question)
     tokens = re.findall(r"[a-z][a-z0-9.-]{2,}|[\u4e00-\u9fff]{2}", question.lower())
@@ -610,6 +686,7 @@ def synthesize_knowledge_answer(
     response_language: Literal["en", "zh"] | None = None,
     context: GenerationContext | None = None,
 ) -> KnowledgeAnswer:
+    contact_lookup = is_contact_lookup(question)
     task = knowledge_task(question, force_deep)
     deep = task == "analysis"
     english = answer_language(current_question, response_language) == "en"
@@ -643,6 +720,11 @@ def synthesize_knowledge_answer(
         if english
         else "当前已收录的知识库中未找到足够相关的证据，暂时无法确认。"
     )
+    if contact_lookup:
+        answer = (
+            "I couldn’t verify the requested contact details in the indexed official contact pages."
+            if english else "我在已收录的官方联系页面里暂未核实到你要的联系方式。"
+        )
     cited: dict[int, SearchDoc] = {}
     generated = False
     attempted = False
@@ -680,6 +762,8 @@ def synthesize_knowledge_answer(
                 + (
                     "Give a grounded comparison or analysis, explaining limitations. "
                     if deep
+                    else "For contact details, lead with the exact requested details and cite the official page. Preserve numbers and addresses verbatim. Do not relabel a general phone number as a support hotline. If a requested detail is absent, say so briefly. Avoid tangential advice. "
+                    if contact_lookup
                     else "For a straightforward first answer, give a compact useful summary: about 150-280 Chinese characters or 80-150 English words, using less when sufficient. Keep examples relevant; leave further detail for follow-up questions. "
                 )
                 + (
@@ -702,7 +786,11 @@ def synthesize_knowledge_answer(
                 + "\n"
                 + (persona.task_prompt or "")
                 + "\nFinal format: a synthesized summary, never excerpts. Cite evidence using exactly [N], where N is the supplied document number. Do not invent numbers or sources."
-                + "\nAfter the answer, add exactly two concise, distinct follow-up questions grounded in these same documents: one for deeper understanding, one for a useful next decision. Each must name its topic so it can stand alone. Do not invent available cases, capabilities or facts, and do not attach citations to questions. Use a final heading ### Continue exploring for English or ### 继续了解 for Chinese, followed by two bullet questions."
+                + (
+                    "\nDo not add suggested follow-up questions."
+                    if contact_lookup
+                    else "\nIf helpful, add up to two distinct follow-up questions that directly advance the user's goal and can be answered from these same documents. Omit the section when nothing useful follows. Do not attach citations to questions. Use a final heading ### Continue exploring for English or ### 继续了解 for Chinese, followed by bullets."
+                )
                 + "\nThe response language rule takes precedence over conflicting Agent language preferences: "
                 + ("respond in English." if english else "仅使用简体中文回答。")
             )
@@ -745,6 +833,12 @@ def synthesize_knowledge_answer(
                     "deep_summary" if deep else "summary",
                 )
                 text = (result.text or "").strip()
+                if contact_lookup:
+                    text = re.split(
+                        r"(?im)^#{2,3}\s+(?:继续了解|继续探索|Continue exploring)\s*$",
+                        text,
+                        maxsplit=1,
+                    )[0].rstrip()
                 text = re.sub(r"【(\d+)】", r"[\1]", text)
                 text = re.sub(r"\[\[(\d+)\]\]", r"[\1]", text)
                 text = re.sub(

@@ -1504,11 +1504,17 @@ class SearchTool(Tool):
         )
 
         if grounded:
-            from onyx.chat.knowledge_rag import indexed_case_chunks, is_case_overview
+            from onyx.chat.knowledge_rag import (
+                indexed_case_chunks,
+                indexed_contact_chunks,
+                is_case_overview,
+                is_contact_lookup,
+            )
             from onyx.context.search.pipeline import _build_index_filters
 
-            if is_case_overview(original_query):
-                case_filters = _build_index_filters(
+            contact_lookup = is_contact_lookup(original_query)
+            if contact_lookup or is_case_overview(original_query):
+                lookup_filters = _build_index_filters(
                     user_provided_filters=effective_filters,
                     user=self.user,
                     project_id_filter=self.project_id_filter,
@@ -1517,9 +1523,12 @@ class SearchTool(Tool):
                     persona_time_cutoff=self.persona_search_info.search_start_date,
                     acl_filters=acl_filters,
                 )
-                case_chunks = indexed_case_chunks(self.document_index, case_filters)
-                seen = {(chunk.document_id, chunk.chunk_id) for chunk in case_chunks}
-                top_chunks = case_chunks + [
+                lookup = (
+                    indexed_contact_chunks if contact_lookup else indexed_case_chunks
+                )
+                priority_chunks = lookup(self.document_index, lookup_filters)
+                seen = {(chunk.document_id, chunk.chunk_id) for chunk in priority_chunks}
+                top_chunks = priority_chunks + [
                     chunk
                     for chunk in top_chunks
                     if (chunk.document_id, chunk.chunk_id) not in seen
