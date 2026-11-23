@@ -692,14 +692,14 @@ class KnowledgeTests(unittest.TestCase):
     def test_named_case_prefers_client_detail_and_keeps_queries_scoped(self):
         from onyx.chat.knowledge_rag import lexical_queries, named_case_subject
 
-        def section(path, title, content):
+        def section(path, title, content, chunk_id=0):
             return NS(
                 center_chunk=NS(
                     document_id=f"https://www.qedge.cn/{path}",
                     semantic_identifier=title,
                     content=content,
                     score=0,
-                    chunk_id=0,
+                    chunk_id=chunk_id,
                 ),
                 combined_content=content,
             )
@@ -709,7 +709,17 @@ class KnowledgeTests(unittest.TestCase):
             "医疗健康行业企业出海解决方案",
             "项目背景：上海联影医疗建设全球官网站群。",
         )
-        other = section("project/other/", "其他项目", "企业官网建设")
+        other = section(
+            "project/auto-group/",
+            "车企海外官网",
+            "企业官网建设。\n 相关案例\t 查看更多 上海联影医疗出海官网。",
+        )
+        related_continuation = section(
+            "project/digital-transformation/",
+            "数字化转型",
+            "上海联影医疗科技股份有限公…",
+            chunk_id=1,
+        )
         article = section("sitecore/", "Sitecore 技术文章", "联影案例的行业趋势")
         page = section("projects/", "案例列表", "联影医疗")
         for question, subject in [
@@ -720,7 +730,9 @@ class KnowledgeTests(unittest.TestCase):
                 self.assertEqual(named_case_subject(question), subject)
                 self.assertIn(subject, lexical_queries(question))
                 self.assertEqual(
-                    rank_sections([article, other, page, project], question),
+                    rank_sections(
+                        [article, other, page, related_continuation, project], question
+                    ),
                     [project],
                 )
         for question in (

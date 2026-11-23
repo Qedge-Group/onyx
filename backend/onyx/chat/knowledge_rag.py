@@ -366,15 +366,31 @@ def named_case_subject(question: str) -> str | None:
     return subject
 
 
+_CASE_AUXILIARY_BLOCK = re.compile(
+    r"(?<!\S)(?:相关案例|相关项目|相关新闻|新闻动态|Related (?:case studies|projects)|Our Journal)(?!\S)",
+    re.IGNORECASE,
+)
+
+
+def _case_body(text: str) -> str:
+    return _CASE_AUXILIARY_BLOCK.split(text, maxsplit=1)[0]
+
+
 def _name_matches_case_chunk(chunk: InferenceChunk, subject: str) -> bool:
+    # Start at the opening chunk, since later chunks can begin inside a related
+    # case card after the previous chunk's section heading.
+    if chunk.chunk_id != 0:
+        return False
     path = urlsplit(chunk.document_id).path.lower().strip("/").split("/")
     if len(path) < 2 or path[0] not in CASE_PAGE_SLUGS:
         return False
-    text = (chunk.semantic_identifier + "\n" + chunk.content[:2000]).casefold()
+    text = (chunk.semantic_identifier + "\n" + _case_body(chunk.content[:2000])).casefold()
     subject = subject.casefold()
     if re.search(r"[\u4e00-\u9fff]", subject):
         return subject in text
-    return re.search(r"(?<!\w)" + re.escape(subject) + r"(?!\w)", text) is not None
+    return re.search(
+        r"(?<![a-z0-9_])" + re.escape(subject) + r"(?![a-z0-9_])", text
+    ) is not None
 
 
 def focus_query(question: str) -> str:
@@ -514,9 +530,15 @@ def indexed_case_chunks(
         ],
         filters=filters,
     )
-    if subject:
-        return [chunk for chunk in chunks if _name_matches_case_chunk(chunk, subject)]
-    return chunks
+    if not subject:
+        return chunks
+    matched_ids = {
+        chunk.document_id for chunk in chunks if _name_matches_case_chunk(chunk, subject)
+    }
+    return sorted(
+        (chunk for chunk in chunks if chunk.document_id in matched_ids),
+        key=lambda chunk: (chunk.document_id, chunk.chunk_id),
+    )
 
 
 def indexed_contact_chunks(
@@ -909,7 +931,7 @@ def synthesize_knowledge_answer(
                         else None
                     )
                     or excerpt(
-                        item["content"],
+                        _case_body(item["content"]) if named_case else item["content"],
                         question,
                         limit=3200 if deep else (1800 if task == "qualified" else 1400),
                         max_passages=10 if deep else (6 if task == "qualified" else 4),
