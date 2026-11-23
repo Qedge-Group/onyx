@@ -772,6 +772,11 @@ def synthesize_knowledge_answer(
     task = knowledge_task(question, force_deep)
     deep = task == "analysis"
     english = answer_language(current_question, response_language) == "en"
+    short_entity = (
+        task == "answer"
+        and not case_overview
+        and _ENTITY_ONLY.fullmatch(current_question) is not None
+    )
     synthesis_question = (
         (
             f'Introduce "{current_question.strip()}" using the supplied indexed evidence.'
@@ -865,7 +870,7 @@ def synthesize_knowledge_answer(
                     else "Lead with the most useful supported point. Let the structure and detail follow the question and evidence; avoid a stock opening. "
                 )
                 + (
-                    "Check every explicit requirement against the evidence before recommending a case or solution. Explain which conditions are supported and which remain unknown; ask one focused clarification when necessary. "
+                    "Check each explicit requirement against the evidence. Start with the matching case or solution if one is supported. Otherwise, identify the missing requirement first and offer a brief, relevant alternative when the evidence supports one. "
                     if task == "qualified"
                     else ""
                 )
@@ -877,7 +882,8 @@ def synthesize_knowledge_answer(
                 + (
                     "\nGive two to four concrete examples of work delivered by this "
                     "organization, or fewer when evidence is limited. Cite each project. "
-                    "Say what the organization did in each example. A client logo, a "
+                    "Say what the organization did in one or two sentences per example. "
+                    "End the list there without adding more examples afterward. A client logo, a "
                     "product vendor's example, or an industry article does not prove "
                     "project delivery. Preserve any client anonymity in the source."
                     if case_overview else ""
@@ -892,6 +898,8 @@ def synthesize_knowledge_answer(
                     "or office, provide just the requested details. Do not list "
                     "locations unless asked, and do not repeat how the form works."
                     if contact_lookup
+                    else "\nGive a definition in one or two short sentences. Avoid product inventories, history, upgrade notes, and suggested follow-up questions."
+                    if short_entity
                     else "\nIf helpful, add up to two distinct follow-up questions that directly advance the user's goal and can be answered from these same documents. Omit the section when nothing useful follows. Do not attach citations to questions. Use a final heading ### Continue exploring for English or ### 继续了解 for Chinese, followed by bullets."
                 )
                 + "\nThe response language rule takes precedence over conflicting Agent language preferences: "
@@ -949,6 +957,7 @@ def synthesize_knowledge_answer(
                     )[0].rstrip()
                 text = re.sub(r"【(\d+)】", r"[\1]", text)
                 text = re.sub(r"\[\[(\d+)\]\]", r"[\1]", text)
+                text = re.sub(r"\[(\d+)\]\(https?://[^)\s]+\)", r"[\1]", text)
                 text = re.sub(
                     r"\[(\d+(?:\s*[,，]\s*\d+)+)\]",
                     lambda m: "".join("[" + n + "]" for n in re.findall(r"\d+", m[1])),
@@ -967,15 +976,8 @@ def synthesize_knowledge_answer(
                         if include_citations
                         else {}
                     )
-                    answer = re.sub(
-                        r"\[(\d+)\]",
-                        lambda m: (
-                            f"[[{m[1]}]]({sources[int(m[1])].link or sources[int(m[1])].document_id})"
-                            if include_citations
-                            else ""
-                        ),
-                        text,
-                    )
+                    # The shared chat renderer turns these markers into verified links.
+                    answer = text if include_citations else re.sub(r"\[\d+\]", "", text)
                     generated = True
             except Exception as exc:
                 logger.info(
