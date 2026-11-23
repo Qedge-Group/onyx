@@ -1509,11 +1509,13 @@ class SearchTool(Tool):
                 indexed_contact_chunks,
                 is_case_overview,
                 is_contact_lookup,
+                named_case_subject,
             )
             from onyx.context.search.pipeline import _build_index_filters
 
             contact_lookup = is_contact_lookup(original_query)
-            if contact_lookup or is_case_overview(original_query):
+            case_subject = named_case_subject(original_query)
+            if contact_lookup or case_subject or is_case_overview(original_query):
                 lookup_filters = _build_index_filters(
                     user_provided_filters=effective_filters,
                     user=self.user,
@@ -1523,10 +1525,13 @@ class SearchTool(Tool):
                     persona_time_cutoff=self.persona_search_info.search_start_date,
                     acl_filters=acl_filters,
                 )
-                lookup = (
-                    indexed_contact_chunks if contact_lookup else indexed_case_chunks
+                priority_chunks = (
+                    indexed_contact_chunks(self.document_index, lookup_filters)
+                    if contact_lookup
+                    else indexed_case_chunks(
+                        self.document_index, lookup_filters, case_subject
+                    )
                 )
-                priority_chunks = lookup(self.document_index, lookup_filters)
                 seen = {(chunk.document_id, chunk.chunk_id) for chunk in priority_chunks}
                 top_chunks = priority_chunks + [
                     chunk
