@@ -403,6 +403,12 @@ def rank_sections(
             if _CONTACT_PATH.search(urlsplit(section.center_chunk.document_id).path)
             and _contact_excerpt(section.combined_content, limit=1400)
         ]
+        primary_pages = [
+            section
+            for section in contact_sections
+            if _CONTACT_PATH.fullmatch(urlsplit(section.center_chunk.document_id).path)
+        ]
+        contact_sections = primary_pages or contact_sections
         for section in contact_sections:
             section.center_chunk.score = 1.0
         return contact_sections[:4]
@@ -787,7 +793,13 @@ def synthesize_knowledge_answer(
                 + (persona.task_prompt or "")
                 + "\nFinal format: a synthesized summary, never excerpts. Cite evidence using exactly [N], where N is the supplied document number. Do not invent numbers or sources."
                 + (
-                    "\nDo not add suggested follow-up questions."
+                    "\nDo not add suggested follow-up questions. Keep the answer to "
+                    "one to three short lines. For a general contact request, give "
+                    "the official phone and email when available, and cite the "
+                    "official contact page. If an inquiry form is the only supported "
+                    "channel, mention it and cite the page. For a specific field "
+                    "or office, provide just the requested details. Do not list "
+                    "locations unless asked, and do not repeat how the form works."
                     if contact_lookup
                     else "\nIf helpful, add up to two distinct follow-up questions that directly advance the user's goal and can be answered from these same documents. Omit the section when nothing useful follows. Do not attach citations to questions. Use a final heading ### Continue exploring for English or ### 继续了解 for Chinese, followed by bullets."
                 )
