@@ -1,3 +1,4 @@
+import json
 import unittest
 from types import SimpleNamespace as NS
 from unittest.mock import MagicMock, patch
@@ -216,6 +217,7 @@ class KnowledgeTests(unittest.TestCase):
         filters=None,
         instructions="",
         reminders="",
+        history=(),
     ):
         d = doc()
         tool = MagicMock(name="internal_search")
@@ -253,7 +255,7 @@ class KnowledgeTests(unittest.TestCase):
         )
         llm.config.model_name = "test-flash"
         state = synthesize_knowledge_answer(
-            question=resolve_question([message(question)]),
+            question=resolve_question([*history, message(question)]),
             current_question=resolve_question([message(question)]),
             response=tool.run.return_value,
             persona=PersonaPromptConfig(
@@ -329,6 +331,67 @@ class KnowledgeTests(unittest.TestCase):
         ]
         self.assertEqual(resolve_question(h), "Sitecore 服务是什么？")
 
+    def test_social_turns_skip_retrieval_and_generation(self):
+        from onyx.chat.knowledge_agent import KnowledgeFeatureState, _KnowledgeGeneration
+        from onyx.llm.models import GenerationRequest, ToolCall
+
+        llm = MagicMock()
+        generation = _KnowledgeGeneration(
+            llm,
+            KnowledgeFeatureState(
+                persona=PersonaPromptConfig(
+                    system_prompt="",
+                    task_prompt="",
+                    datetime_aware=False,
+                    replace_base_system_prompt=False,
+                ),
+                response_language="zh",
+            ),
+        )
+        for question, expected in [
+            ("你好！", "你好"),
+            ("Hello!", "Hi"),
+            ("谢谢你", "不客气"),
+            ("详细一点", "想继续了解"),
+        ]:
+            with self.subTest(question=question):
+                reply = generation._answer(
+                    GenerationRequest(messages=[message(question)]), None
+                )
+                self.assertIsInstance(reply.content[0], TextContent)
+                self.assertIn(expected, reply.content[0].text)
+        for question in ("你好，联系方式", "Sitecore", "Hi, who are your clients?"):
+            reply = generation._answer(
+                GenerationRequest(messages=[message(question)]), None
+            )
+            self.assertIsInstance(reply.content[0], ToolCall)
+        llm.invoke.assert_not_called()
+
+    def test_short_product_name_is_a_focused_lexical_query(self):
+        from onyx.chat.knowledge_rag import lexical_queries
+
+        self.assertEqual(lexical_queries("Drupal"), ["Drupal"])
+        self.assertEqual(lexical_queries("Sitecore")[0], "Sitecore")
+        self.assertEqual(lexical_queries("QEdge")[0], "QEdge")
+
+    def test_short_followup_uses_topic_across_social_turns(self):
+        history = [
+            message("你们做过哪些项目？"),
+            message("谢谢"),
+            message("那开源方案呢？"),
+        ]
+        question = resolve_question(history)
+        self.assertEqual(question, "你们做过哪些项目？ / 那开源方案呢？")
+        history.append(message("详细一点"))
+        self.assertIn("你们做过哪些项目", resolve_question(history))
+        self.assertIn("开源方案", resolve_question(history))
+        _, llm, _, _ = self.run_turn(
+            "那开源方案呢？", history=history[:2]
+        )
+        payload = json.loads(llm.invoke.call_args.args[0].messages[0].text)
+        self.assertEqual(payload["question"], "那开源方案呢？")
+        self.assertEqual(payload["previous_topic"], "你们做过哪些项目？")
+
     def test_followup_uses_user_question_only(self):
         h = [
             message("Sitecore 服务"),
@@ -389,7 +452,7 @@ class KnowledgeTests(unittest.TestCase):
     def test_empty_evidence_does_not_generate_even_for_deep_question(self):
         state, llm, _, _ = self.run_turn(empty=True, deep=True)
         llm.invoke.assert_not_called()
-        self.assertIn("无法确认", state.answer)
+        self.assertIn("暂时没找到能确认这个问题的资料", state.answer)
         self.assertEqual(set(state.citations), set())
 
     def test_deep_answer_uses_one_grounded_generation(self):

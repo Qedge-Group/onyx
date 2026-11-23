@@ -10,8 +10,11 @@ from pydantic import BaseModel, JsonValue
 from onyx.agents.models import AgentState, PreparedStep, StepInput
 from onyx.agents.runtime import Agent, RestorableFeature
 from onyx.chat.knowledge_rag import (
+    answer_language,
     focus_query,
+    is_vague_continuation,
     resolve_question,
+    social_reply,
     summary_token_budget,
     synthesize_knowledge_answer,
 )
@@ -75,23 +78,36 @@ class _KnowledgeGeneration(LLM):
     ) -> AssistantMessage:
         if context is not None and context.cancellation is not None:
             context.cancellation.check()
+        users = [m for m in request.messages if isinstance(m, UserMessage)]
+        current = resolve_question(users[-1:])
+        question = resolve_question(users)
         results = [m for m in request.messages if isinstance(m, ToolResultMessage)]
         if not results:
+            reply = social_reply(current)
+            if (
+                reply is None
+                and question == current
+                and is_vague_continuation(current)
+            ):
+                reply = (
+                    "What would you like me to say more about?"
+                    if answer_language(current, self.settings.response_language) == "en"
+                    else "你想继续了解哪方面？可以告诉我一个主题。"
+                )
+            if reply is not None:
+                return AssistantMessage(content=[TextContent(text=reply)])
             return AssistantMessage(
                 content=[
                     ToolCall(
                         id=str(uuid4()),
                         name="internal_search",
-                        arguments={
-                            "queries": [focus_query(resolve_question(request.messages))]
-                        },
+                        arguments={"queries": [focus_query(question)]},
                     )
                 ]
             )
-        users = [m for m in request.messages if isinstance(m, UserMessage)]
         answer = synthesize_knowledge_answer(
-            question=resolve_question(users),
-            current_question=resolve_question(users[-1:]),
+            question=question,
+            current_question=current,
             response=results[-1],
             persona=self.settings.persona,
             llm=self.llm,
@@ -104,9 +120,7 @@ class _KnowledgeGeneration(LLM):
             model_name=self.config.model_name,
             model_provider=self.config.model_provider,
             reasoning_effort=ReasoningEffort.OFF,
-            max_tokens=summary_token_budget(
-                resolve_question(users), self.settings.force_deep
-            ),
+            max_tokens=summary_token_budget(question, self.settings.force_deep),
             sent_kwargs=answer.request_params,
         )
         return AssistantMessage(
@@ -201,7 +215,7 @@ class KnowledgeAgent(Agent, RestorableFeature):
                 for m in [*step.history, *step.input_messages]
                 if isinstance(m, UserMessage)
             ]
-            return [*users[-2:], *step.messages]
+            return [*users[-6:], *step.messages]
 
         return PreparedStep(
             input_messages=[],
