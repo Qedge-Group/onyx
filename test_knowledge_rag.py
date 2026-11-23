@@ -304,10 +304,12 @@ class KnowledgeTests(unittest.TestCase):
             "概括的服务总结。【1】",
             "概括的服务总结。[[1]]",
             "概括的服务总结。[1,1]",
+            "概括的服务总结。[[1]](https://irrelevant.example/page)",
         ]:
             state, _, _, _ = self.run_turn(response=text)
             self.assertEqual(state.request_params["qedge_rag_mode"], "summary")
-            self.assertNotIn("直接摘录", state.answer)
+            self.assertRegex(state.answer, r"^概括的服务总结。(?:\[1\])+$")
+            self.assertEqual(state.citations[1].link, doc().link)
 
     def test_flash_is_used_for_all_question_depths(self):
         from onyx.chat.knowledge_rag import summary_model_override
